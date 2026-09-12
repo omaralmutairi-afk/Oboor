@@ -868,9 +868,24 @@ final class PreviewWindowController: NSWindowController {
 
         header.addArrangedSubview(icon)
         header.addArrangedSubview(textStack)
+
+        // Wrapped and centered rather than added directly: a plain
+        // full-width horizontal NSStackView packs its content at the
+        // leading edge, which left the Wi-Fi icon/name flush left instead
+        // of centered like the rest of the card.
+        let headerContainer = NSView()
         header.translatesAutoresizingMaskIntoConstraints = false
-        root.addArrangedSubview(header)
-        header.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
+        headerContainer.translatesAutoresizingMaskIntoConstraints = false
+        headerContainer.addSubview(header)
+        NSLayoutConstraint.activate([
+            header.centerXAnchor.constraint(equalTo: headerContainer.centerXAnchor),
+            header.topAnchor.constraint(equalTo: headerContainer.topAnchor),
+            header.bottomAnchor.constraint(equalTo: headerContainer.bottomAnchor),
+            header.leadingAnchor.constraint(greaterThanOrEqualTo: headerContainer.leadingAnchor),
+            header.trailingAnchor.constraint(lessThanOrEqualTo: headerContainer.trailingAnchor),
+        ])
+        root.addArrangedSubview(headerContainer)
+        headerContainer.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
 
         root.addArrangedSubview(NSBox.hairline())
 
@@ -1282,6 +1297,10 @@ final class SettingsWindowController: NSWindowController {
         )
         window.title = L.t(.settingsWindowTitle)
         window.isReleasedWhenClosed = false
+        // Without this it opens at the literal (0, 0) origin passed above,
+        // i.e. the screen's bottom-left corner, instead of anywhere near
+        // the middle of the display.
+        window.center()
         super.init(window: window)
         buildUI()
     }

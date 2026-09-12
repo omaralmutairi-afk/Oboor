@@ -6,6 +6,7 @@ import WebKit
 import Contacts
 import EventKit
 import ScreenCaptureKit
+import CoreImage
 
 extension Notification.Name {
     static let oboorSettingsChanged = Notification.Name("oboorSettingsChanged")
@@ -99,7 +100,10 @@ enum L {
              calendarCardTitle, calendarAdd, calendarAdded, calendarAddFailed, calendarNoTitle,
              emailCardTitle, emailOpen, phoneCardTitle, phoneCall, phoneCopy,
              smsCardTitle, smsOpen, geoCardTitle, geoOpen, textCardTitle, copyText,
-             genericOpenFailed, close
+             genericOpenFailed, close,
+             wifiShowQR, qrCodeWindowTitle,
+             fieldName, fieldPhone, fieldEmail, fieldOrg, fieldPassword,
+             fieldTitle, fieldLocation, fieldStart, fieldEnd, fieldCoordinates, fieldMessage
     }
 
     private static let table: [Key: (ar: String, en: String)] = [
@@ -130,6 +134,19 @@ enum L {
         .wifiCopyPassword: ("نسخ كلمة المرور", "Copy Password"),
         .wifiOpenSettings: ("فتح إعدادات الواي فاي", "Open Wi-Fi Settings"),
         .wifiHiddenBadge: ("شبكة مخفية", "Hidden network"),
+        .wifiShowQR: ("إظهار رمز الشبكة", "Show Network QR Code"),
+        .qrCodeWindowTitle: ("رمز الشبكة — عُبور", "Network QR Code — Oboor"),
+        .fieldName: ("الاسم", "Name"),
+        .fieldPhone: ("الهاتف", "Phone"),
+        .fieldEmail: ("البريد الإلكتروني", "Email"),
+        .fieldOrg: ("الجهة", "Organization"),
+        .fieldPassword: ("كلمة المرور", "Password"),
+        .fieldTitle: ("العنوان", "Title"),
+        .fieldLocation: ("الموقع", "Location"),
+        .fieldStart: ("البداية", "Start"),
+        .fieldEnd: ("النهاية", "End"),
+        .fieldCoordinates: ("الإحداثيات", "Coordinates"),
+        .fieldMessage: ("الرسالة", "Message"),
         .contactCardTitle: ("جهة اتصال", "Contact"),
         .contactAdd: ("إضافة إلى جهات الاتصال", "Add to Contacts"),
         .contactAdded: ("تمت الإضافة ✓", "Added ✓"),
@@ -759,6 +776,52 @@ enum CalendarSaver {
     }
 }
 
+// MARK: - Re-displaying a scanned code as a QR image
+
+/// Regenerates a QR image from the exact raw payload that was scanned, so
+/// e.g. a Wi-Fi network's code can be shown on screen for another device to
+/// scan back in — Oboor doesn't keep the original scanned image at all, so
+/// this is a fresh render, not a saved copy.
+enum QRCodeImageGenerator {
+    static func generate(from string: String, scale: CGFloat = 10) -> NSImage? {
+        guard let data = string.data(using: .utf8), let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
+        filter.setValue(data, forKey: "inputMessage")
+        filter.setValue("M", forKey: "inputCorrectionLevel")
+        guard let output = filter.outputImage else { return nil }
+        let transformed = output.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let rep = NSCIImageRep(ciImage: transformed)
+        let image = NSImage(size: rep.size)
+        image.addRepresentation(rep)
+        return image
+    }
+}
+
+final class QRCodeWindowController: NSWindowController {
+    init(image: NSImage, title: String) {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 360),
+            styleMask: [.titled, .closable],
+            backing: .buffered, defer: false
+        )
+        window.title = title
+        window.isReleasedWhenClosed = false
+        super.init(window: window)
+        guard let content = window.contentView else { return }
+        let imageView = NSImageView(image: image)
+        imageView.imageScaling = .scaleProportionallyUpOrDown
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(imageView)
+        NSLayoutConstraint.activate([
+            imageView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
+            imageView.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
+            imageView.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
+            imageView.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -24),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+}
+
 // MARK: - Preview window
 
 final class PreviewPanel: NSPanel {
@@ -772,6 +835,7 @@ final class PreviewWindowController: NSWindowController {
     private var iconView: NSImageView?
     private var titleLabel: NSTextField?
     private var subtitleLabel: NSTextField?
+    private var qrCodeWindow: QRCodeWindowController?
 
     init(payload: ParsedPayload) {
         self.payload = payload
@@ -947,39 +1011,39 @@ final class PreviewWindowController: NSWindowController {
         case .wifi(let ssid, let password, let hidden):
             var rows: [(String, String)] = [(L.t(.wifiCardTitle), ssid.isEmpty ? "—" : ssid)]
             if hidden { rows.append(("", L.t(.wifiHiddenBadge))) }
-            if let password { rows.append(("Password", String(repeating: "•", count: password.count))) }
-            return detailStack(rows)
+            if let password { rows.append((L.t(.fieldPassword), String(repeating: "•", count: password.count))) }
+            return verticallyCentered(detailStack(rows))
 
         case .contact(let name, let phone, let email, let org):
-            return detailStack([
-                ("Name", name),
-                ("Phone", phone),
-                ("Email", email),
-                ("Org", org),
-            ].compactMap { label, value in value.map { (label, $0) } })
+            return verticallyCentered(detailStack([
+                (L.t(.fieldName), name),
+                (L.t(.fieldPhone), phone),
+                (L.t(.fieldEmail), email),
+                (L.t(.fieldOrg), org),
+            ].compactMap { label, value in value.map { (label, $0) } }))
 
         case .email(let address):
-            return detailStack([("Email", address)])
+            return verticallyCentered(detailStack([(L.t(.fieldEmail), address)]))
 
         case .phone(let number):
-            return detailStack([("Phone", number)])
+            return verticallyCentered(detailStack([(L.t(.fieldPhone), number)]))
 
         case .sms(let url):
-            return detailStack([("Message", url.absoluteString)])
+            return verticallyCentered(detailStack([(L.t(.fieldMessage), url.absoluteString)]))
 
         case .geo(let coords, _):
-            return detailStack([("Coordinates", coords)])
+            return verticallyCentered(detailStack([(L.t(.fieldCoordinates), coords)]))
 
         case .calendarEvent(let title, let location, let start, let end):
             let df = DateFormatter()
             df.dateStyle = .medium
             df.timeStyle = .short
-            return detailStack([
-                ("Title", title),
-                ("Location", location),
-                ("Start", start.map(df.string)),
-                ("End", end.map(df.string)),
-            ].compactMap { label, value in value.map { (label, $0) } })
+            return verticallyCentered(detailStack([
+                (L.t(.fieldTitle), title),
+                (L.t(.fieldLocation), location),
+                (L.t(.fieldStart), start.map(df.string)),
+                (L.t(.fieldEnd), end.map(df.string)),
+            ].compactMap { label, value in value.map { (label, $0) } }))
 
         case .text(let value):
             let scroll = NSScrollView()
@@ -992,6 +1056,24 @@ final class PreviewWindowController: NSWindowController {
             scroll.documentView = textView
             return scroll
         }
+    }
+
+    /// The detail card (a compact vertical stack of a few label/value rows)
+    /// otherwise sits pinned to the top of the body area, which is stretched
+    /// to fill the window — that left a large empty gap below short cards
+    /// like Wi-Fi. Centering it in its own container fixes that without
+    /// touching the (correctly top-anchored) web preview or scrollable text
+    /// bodies, which use buildBody's other branches directly.
+    private func verticallyCentered(_ view: NSView) -> NSView {
+        let container = NSView()
+        view.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            view.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor),
+            view.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+        ])
+        return container
     }
 
     private func detailStack(_ rows: [(String, String)]) -> NSView {
@@ -1045,6 +1127,7 @@ final class PreviewWindowController: NSWindowController {
             if case .wifi(_, let password, _) = kind, password != nil {
                 buttons.append(button(L.t(.wifiCopyPassword), action: #selector(copyWiFiPassword)))
             }
+            buttons.append(button(L.t(.wifiShowQR), action: #selector(showNetworkQRCode)))
             return buttons
 
         case .contact:
@@ -1119,6 +1202,18 @@ final class PreviewWindowController: NSWindowController {
             pb.setString(password, forType: .string)
             showStatus(L.t(.copied))
         }
+    }
+
+    @objc private func showNetworkQRCode() {
+        guard let image = QRCodeImageGenerator.generate(from: payload.raw) else {
+            showStatus(L.t(.genericOpenFailed))
+            return
+        }
+        let controller = QRCodeWindowController(image: image, title: L.t(.qrCodeWindowTitle))
+        qrCodeWindow = controller
+        controller.window?.center()
+        controller.showWindow(nil)
+        controller.window?.makeKeyAndOrderFront(nil)
     }
 
     @objc private func addContact() {

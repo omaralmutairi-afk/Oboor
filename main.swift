@@ -536,6 +536,9 @@ final class LensFrameView: NSView {
 final class LensWindowController: NSWindowController {
     private var scanTimer: Timer?
     private var dragOffset: NSPoint = .zero
+    private var dragCatcher: DraggableBackgroundView!
+    private var isDragging = false
+    private var isCancelled = false
     var onFound: ((String) -> Void)?
     var onCancelled: (() -> Void)?
 
@@ -569,10 +572,12 @@ final class LensWindowController: NSWindowController {
         frameView.autoresizingMask = [.width, .height]
         content.addSubview(frameView)
 
-        let captionBackground = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: Self.frameSize.width, height: Self.captionHeight))
-        captionBackground.material = .hudWindow
-        captionBackground.state = .active
+        // A solid translucent color rather than NSVisualEffectView: the live
+        // blur re-samples the desktop behind the window every frame, which is
+        // pure cost for a 34pt caption strip on a window that moves a lot.
+        let captionBackground = NSView(frame: NSRect(x: 0, y: 0, width: Self.frameSize.width, height: Self.captionHeight))
         captionBackground.wantsLayer = true
+        captionBackground.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.75).cgColor
         captionBackground.layer?.cornerRadius = 10
         captionBackground.layer?.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
         content.addSubview(captionBackground)
@@ -593,8 +598,24 @@ final class LensWindowController: NSWindowController {
             origin.y += delta.y
             window.setFrameOrigin(origin)
         }
+        dragCatcher.onDragStart = { [weak self] in self?.isDragging = true }
+        dragCatcher.onDragEnd = { [weak self] in self?.isDragging = false }
         dragCatcher.onEscape = { [weak self] in self?.cancel() }
-        content.addSubview(dragCatcher, positioned: .below, relativeTo: nil)
+        // Safety net for onDragEnd: if focus gets stolen mid-drag (Mission
+        // Control, Cmd+Tab, a notification banner) the panel never gets a
+        // mouseUp, so isDragging could otherwise stay stuck true forever and
+        // permanently pause scanning.
+        NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: panel, queue: .main) { [weak self] _ in
+            self?.isDragging = false
+        }
+        // Placed ON TOP (not behind): frameView/captionBackground are plain
+        // NSViews, and AppKit's default hit-testing picks the frontmost view
+        // whose *frame* contains the click regardless of what it actually
+        // draws — putting this transparent catcher behind them meant every
+        // click on the visible frame or caption was swallowed before ever
+        // reaching it, so the lens couldn't be dragged at all.
+        content.addSubview(dragCatcher)
+        self.dragCatcher = dragCatcher
     }
 
     func show() {
@@ -603,18 +624,28 @@ final class LensWindowController: NSWindowController {
         let origin = NSPoint(x: mouse.x - panel.frame.width / 2, y: mouse.y - panel.frame.height / 2)
         panel.setFrameOrigin(origin)
         panel.makeKeyAndOrderFront(nil)
-        panel.makeFirstResponder(panel.contentView)
+        panel.makeFirstResponder(dragCatcher)
 
         let windowID = CGWindowID(panel.windowNumber)
         var scanInFlight = false
         scanTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
-            guard let self, let window = self.window, !scanInFlight else { return }
+            guard let self, let window = self.window, !scanInFlight, !self.isDragging else { return }
             scanInFlight = true
             let frame = window.frame
-            Task { @MainActor in
+            // Detached, not @MainActor: the capture + Vision pass is heavy
+            // enough that running it on the main thread stalled the run loop
+            // for the ~0.2s tick, which showed up as jitter/ghosting while
+            // the user was actively dragging the lens. Only the tiny bit that
+            // touches `self`/the window hops back to the main actor.
+            Task.detached(priority: .userInitiated) {
                 let payload = await QRDetector.scan(rect: frame, excludingWindowID: windowID)
-                scanInFlight = false
-                if let payload { self.found(payload) }
+                await MainActor.run {
+                    scanInFlight = false
+                    // The user may have hit Escape while this scan was in
+                    // flight — don't resurrect a preview for a lens they
+                    // already dismissed.
+                    if let payload, !self.isCancelled { self.found(payload) }
+                }
             }
         }
     }
@@ -627,6 +658,7 @@ final class LensWindowController: NSWindowController {
     }
 
     func cancel() {
+        isCancelled = true
         scanTimer?.invalidate()
         scanTimer = nil
         window?.orderOut(nil)
@@ -639,24 +671,32 @@ final class LensWindowController: NSWindowController {
 /// dismissed without any title bar.
 final class DraggableBackgroundView: NSView {
     var onDrag: ((NSPoint) -> Void)?
+    var onDragStart: (() -> Void)?
+    var onDragEnd: (() -> Void)?
     var onEscape: (() -> Void)?
     private var lastDragLocation: NSPoint?
 
     override var acceptsFirstResponder: Bool { true }
 
     override func mouseDown(with event: NSEvent) {
-        lastDragLocation = event.locationInWindow
+        lastDragLocation = NSEvent.mouseLocation
+        onDragStart?()
     }
 
+    // Screen coordinates, never `event.locationInWindow`: the window moves
+    // as a result of this very drag, so a window-relative origin shifts out
+    // from under the next event. Each move cancelled the previous one on the
+    // following event, which read as the lens vibrating and double-imaging.
     override func mouseDragged(with event: NSEvent) {
         guard let last = lastDragLocation else { return }
-        let current = event.locationInWindow
+        let current = NSEvent.mouseLocation
         onDrag?(NSPoint(x: current.x - last.x, y: current.y - last.y))
         lastDragLocation = current
     }
 
     override func mouseUp(with event: NSEvent) {
         lastDragLocation = nil
+        onDragEnd?()
     }
 
     override func keyDown(with event: NSEvent) {

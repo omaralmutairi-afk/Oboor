@@ -6,7 +6,6 @@ import WebKit
 import Contacts
 import EventKit
 import ScreenCaptureKit
-import CoreImage
 
 extension Notification.Name {
     static let oboorSettingsChanged = Notification.Name("oboorSettingsChanged")
@@ -101,7 +100,7 @@ enum L {
              emailCardTitle, emailOpen, phoneCardTitle, phoneCall, phoneCopy,
              smsCardTitle, smsOpen, geoCardTitle, geoOpen, textCardTitle, copyText,
              genericOpenFailed, close,
-             wifiShowQR, qrCodeWindowTitle,
+             wifiShowPassword, wifiHidePassword,
              fieldName, fieldPhone, fieldEmail, fieldOrg, fieldPassword,
              fieldTitle, fieldLocation, fieldStart, fieldEnd, fieldCoordinates, fieldMessage
     }
@@ -134,8 +133,8 @@ enum L {
         .wifiCopyPassword: ("نسخ كلمة المرور", "Copy Password"),
         .wifiOpenSettings: ("فتح إعدادات الواي فاي", "Open Wi-Fi Settings"),
         .wifiHiddenBadge: ("شبكة مخفية", "Hidden network"),
-        .wifiShowQR: ("إظهار رمز الشبكة", "Show Network QR Code"),
-        .qrCodeWindowTitle: ("رمز الشبكة — عُبور", "Network QR Code — Oboor"),
+        .wifiShowPassword: ("إظهار كلمة المرور", "Show Password"),
+        .wifiHidePassword: ("إخفاء كلمة المرور", "Hide Password"),
         .fieldName: ("الاسم", "Name"),
         .fieldPhone: ("الهاتف", "Phone"),
         .fieldEmail: ("البريد الإلكتروني", "Email"),
@@ -776,52 +775,6 @@ enum CalendarSaver {
     }
 }
 
-// MARK: - Re-displaying a scanned code as a QR image
-
-/// Regenerates a QR image from the exact raw payload that was scanned, so
-/// e.g. a Wi-Fi network's code can be shown on screen for another device to
-/// scan back in — Oboor doesn't keep the original scanned image at all, so
-/// this is a fresh render, not a saved copy.
-enum QRCodeImageGenerator {
-    static func generate(from string: String, scale: CGFloat = 10) -> NSImage? {
-        guard let data = string.data(using: .utf8), let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
-        filter.setValue(data, forKey: "inputMessage")
-        filter.setValue("M", forKey: "inputCorrectionLevel")
-        guard let output = filter.outputImage else { return nil }
-        let transformed = output.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-        let rep = NSCIImageRep(ciImage: transformed)
-        let image = NSImage(size: rep.size)
-        image.addRepresentation(rep)
-        return image
-    }
-}
-
-final class QRCodeWindowController: NSWindowController {
-    init(image: NSImage, title: String) {
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 320, height: 360),
-            styleMask: [.titled, .closable],
-            backing: .buffered, defer: false
-        )
-        window.title = title
-        window.isReleasedWhenClosed = false
-        super.init(window: window)
-        guard let content = window.contentView else { return }
-        let imageView = NSImageView(image: image)
-        imageView.imageScaling = .scaleProportionallyUpOrDown
-        imageView.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(imageView)
-        NSLayoutConstraint.activate([
-            imageView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
-            imageView.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
-            imageView.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
-            imageView.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -24),
-        ])
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-}
-
 // MARK: - Preview window
 
 final class PreviewPanel: NSPanel {
@@ -835,7 +788,10 @@ final class PreviewWindowController: NSWindowController {
     private var iconView: NSImageView?
     private var titleLabel: NSTextField?
     private var subtitleLabel: NSTextField?
-    private var qrCodeWindow: QRCodeWindowController?
+    private var wifiPasswordLabel: NSTextField?
+    private var wifiPasswordToggleButton: NSButton?
+    private var wifiPasswordPlaintext: String?
+    private var wifiPasswordRevealed = false
 
     init(payload: ParsedPayload) {
         self.payload = payload
@@ -1011,8 +967,14 @@ final class PreviewWindowController: NSWindowController {
         case .wifi(let ssid, let password, let hidden):
             var rows: [(String, String)] = [(L.t(.wifiCardTitle), ssid.isEmpty ? "—" : ssid)]
             if hidden { rows.append(("", L.t(.wifiHiddenBadge))) }
-            if let password { rows.append((L.t(.fieldPassword), String(repeating: "•", count: password.count))) }
-            return verticallyCentered(detailStack(rows))
+            let stack = detailStack(rows)
+            if let password {
+                wifiPasswordPlaintext = password
+                let (row, valueField) = makeRow(label: L.t(.fieldPassword), value: String(repeating: "•", count: password.count))
+                wifiPasswordLabel = valueField
+                stack.addArrangedSubview(row)
+            }
+            return verticallyCentered(stack)
 
         case .contact(let name, let phone, let email, let org):
             return verticallyCentered(detailStack([
@@ -1059,45 +1021,51 @@ final class PreviewWindowController: NSWindowController {
     }
 
     /// The detail card (a compact vertical stack of a few label/value rows)
-    /// otherwise sits pinned to the top of the body area, which is stretched
-    /// to fill the window — that left a large empty gap below short cards
-    /// like Wi-Fi. Centering it in its own container fixes that without
-    /// touching the (correctly top-anchored) web preview or scrollable text
-    /// bodies, which use buildBody's other branches directly.
+    /// otherwise sits pinned to the top-leading corner of the body area,
+    /// which is stretched to fill the window — that left a large empty gap
+    /// below and to the side of short cards like Wi-Fi. Centering it on both
+    /// axes in its own container fixes that without touching the (correctly
+    /// top-anchored, edge-to-edge) web preview or scrollable text bodies,
+    /// which use buildBody's other branches directly.
     private func verticallyCentered(_ view: NSView) -> NSView {
         let container = NSView()
         view.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(view)
         NSLayoutConstraint.activate([
-            view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            view.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor),
+            view.centerXAnchor.constraint(equalTo: container.centerXAnchor),
             view.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            view.leadingAnchor.constraint(greaterThanOrEqualTo: container.leadingAnchor, constant: 8),
+            view.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -8),
         ])
         return container
     }
 
-    private func detailStack(_ rows: [(String, String)]) -> NSView {
+    private func makeRow(label: String, value: String) -> (row: NSView, valueField: NSTextField) {
+        let row = NSStackView()
+        row.orientation = .vertical
+        row.alignment = .leading
+        row.spacing = 2
+        if !label.isEmpty {
+            let l = NSTextField(labelWithString: label)
+            l.font = .systemFont(ofSize: 10, weight: .semibold)
+            l.textColor = .secondaryLabelColor
+            row.addArrangedSubview(l)
+        }
+        let v = NSTextField(labelWithString: value)
+        v.font = .systemFont(ofSize: 13)
+        v.lineBreakMode = .byWordWrapping
+        v.maximumNumberOfLines = 3
+        row.addArrangedSubview(v)
+        return (row, v)
+    }
+
+    private func detailStack(_ rows: [(String, String)]) -> NSStackView {
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 8
         for (label, value) in rows {
-            let row = NSStackView()
-            row.orientation = .vertical
-            row.alignment = .leading
-            row.spacing = 2
-            if !label.isEmpty {
-                let l = NSTextField(labelWithString: label)
-                l.font = .systemFont(ofSize: 10, weight: .semibold)
-                l.textColor = .secondaryLabelColor
-                row.addArrangedSubview(l)
-            }
-            let v = NSTextField(labelWithString: value)
-            v.font = .systemFont(ofSize: 13)
-            v.lineBreakMode = .byWordWrapping
-            v.maximumNumberOfLines = 3
-            row.addArrangedSubview(v)
-            stack.addArrangedSubview(row)
+            stack.addArrangedSubview(makeRow(label: label, value: value).row)
         }
         return stack
     }
@@ -1126,8 +1094,10 @@ final class PreviewWindowController: NSWindowController {
             var buttons = [button(L.t(.wifiOpenSettings), action: #selector(openWiFiSettings))]
             if case .wifi(_, let password, _) = kind, password != nil {
                 buttons.append(button(L.t(.wifiCopyPassword), action: #selector(copyWiFiPassword)))
+                let toggle = button(L.t(.wifiShowPassword), action: #selector(toggleWiFiPasswordVisibility))
+                wifiPasswordToggleButton = toggle
+                buttons.append(toggle)
             }
-            buttons.append(button(L.t(.wifiShowQR), action: #selector(showNetworkQRCode)))
             return buttons
 
         case .contact:
@@ -1204,16 +1174,11 @@ final class PreviewWindowController: NSWindowController {
         }
     }
 
-    @objc private func showNetworkQRCode() {
-        guard let image = QRCodeImageGenerator.generate(from: payload.raw) else {
-            showStatus(L.t(.genericOpenFailed))
-            return
-        }
-        let controller = QRCodeWindowController(image: image, title: L.t(.qrCodeWindowTitle))
-        qrCodeWindow = controller
-        controller.window?.center()
-        controller.showWindow(nil)
-        controller.window?.makeKeyAndOrderFront(nil)
+    @objc private func toggleWiFiPasswordVisibility() {
+        guard let label = wifiPasswordLabel, let password = wifiPasswordPlaintext else { return }
+        wifiPasswordRevealed.toggle()
+        label.stringValue = wifiPasswordRevealed ? password : String(repeating: "•", count: password.count)
+        wifiPasswordToggleButton?.title = wifiPasswordRevealed ? L.t(.wifiHidePassword) : L.t(.wifiShowPassword)
     }
 
     @objc private func addContact() {

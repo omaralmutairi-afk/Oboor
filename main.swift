@@ -869,21 +869,7 @@ final class PreviewWindowController: NSWindowController {
         header.addArrangedSubview(icon)
         header.addArrangedSubview(textStack)
 
-        // Wrapped and centered rather than added directly: a plain
-        // full-width horizontal NSStackView packs its content at the
-        // leading edge, which left the Wi-Fi icon/name flush left instead
-        // of centered like the rest of the card.
-        let headerContainer = NSView()
-        header.translatesAutoresizingMaskIntoConstraints = false
-        headerContainer.translatesAutoresizingMaskIntoConstraints = false
-        headerContainer.addSubview(header)
-        NSLayoutConstraint.activate([
-            header.centerXAnchor.constraint(equalTo: headerContainer.centerXAnchor),
-            header.topAnchor.constraint(equalTo: headerContainer.topAnchor),
-            header.bottomAnchor.constraint(equalTo: headerContainer.bottomAnchor),
-            header.leadingAnchor.constraint(greaterThanOrEqualTo: headerContainer.leadingAnchor),
-            header.trailingAnchor.constraint(lessThanOrEqualTo: headerContainer.trailingAnchor),
-        ])
+        let headerContainer = centeredHorizontally(header)
         root.addArrangedSubview(headerContainer)
         headerContainer.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
 
@@ -910,9 +896,9 @@ final class PreviewWindowController: NSWindowController {
         actions.orientation = .horizontal
         actions.spacing = 8
         buildActionButtons(for: payload.kind).forEach { actions.addArrangedSubview($0) }
-        actions.translatesAutoresizingMaskIntoConstraints = false
-        root.addArrangedSubview(actions)
-        actions.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
+        let actionsContainer = centeredHorizontally(actions)
+        root.addArrangedSubview(actionsContainer)
+        actionsContainer.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
 
         if payload.kind.isAppStore {
             fetchAppStoreInfo()
@@ -1033,6 +1019,27 @@ final class PreviewWindowController: NSWindowController {
             scroll.documentView = textView
             return scroll
         }
+    }
+
+    /// Wraps a full-width horizontal NSStackView (the header row, the action
+    /// button row) in a container that centers it instead of leaving it
+    /// packed at the leading edge, which is what a plain NSStackView does on
+    /// its own. Top/bottom are pinned directly (not centered) since these
+    /// rows' own height already matches their content — only horizontal
+    /// position needs correcting here.
+    private func centeredHorizontally(_ view: NSView) -> NSView {
+        let container = NSView()
+        view.translatesAutoresizingMaskIntoConstraints = false
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            view.topAnchor.constraint(equalTo: container.topAnchor),
+            view.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            view.leadingAnchor.constraint(greaterThanOrEqualTo: container.leadingAnchor),
+            view.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor),
+        ])
+        return container
     }
 
     /// The detail card (a compact vertical stack of a few label/value rows)

@@ -117,8 +117,8 @@ enum L {
         .languageRow: ("اللغة", "Language"),
         .launchAtLoginCheckbox: ("تشغيل عُبور تلقائيًا عند بدء تشغيل الماك", "Launch Oboor automatically at startup"),
         .pressCombo: ("اضغط الاختصار…", "Press a shortcut…"),
-        .lensCaption: ("وجّه الإطار على رمز QR — Esc للإلغاء", "Aim the frame at a QR code — Esc to cancel"),
-        .lensCaptionPinned: ("مثبّت — انقر للمتابعة", "Pinned — click to resume following"),
+        .lensCaption: ("مسافة للتثبيت · Esc للإلغاء", "Space to pin · Esc to cancel"),
+        .lensCaptionPinned: ("مثبّت — مسافة للمتابعة · Esc للإلغاء", "Pinned — Space: follow · Esc: cancel"),
         .screenRecordingAlertTitle: ("عُبور يحتاج صلاحية تسجيل الشاشة", "Oboor needs Screen Recording access"),
         .screenRecordingAlertBody: ("عشان يقرأ رمز QR من شاشتك، فعّل الصلاحية من إعدادات النظام ثم أعد فتح عُبور.", "To read a QR code from your screen, grant the permission in System Settings, then relaunch Oboor."),
         .screenRecordingAlertOpenSettings: ("فتح الإعدادات", "Open Settings"),
@@ -232,30 +232,41 @@ final class HistoryStore {
 
 // MARK: - Global hotkey (Carbon)
 
-private var hotKeyToggleHandler: (() -> Void)?
+private var hotKeyHandlers: [UInt32: () -> Void] = [:]
+private var hotKeyEventHandlerInstalled = false
 
 private func hotKeyEventHandler(_ nextHandler: EventHandlerCallRef?, _ event: EventRef?, _ userData: UnsafeMutableRawPointer?) -> OSStatus {
-    hotKeyToggleHandler?()
+    var hotKeyID = EventHotKeyID()
+    let status = GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &hotKeyID)
+    guard status == noErr else { return status }
+    hotKeyHandlers[hotKeyID.id]?()
     return noErr
 }
 
 final class GlobalHotKey {
+    private let id: UInt32
     private var hotKeyRef: EventHotKeyRef?
-    private var handlerInstalled = false
+
+    init(id: UInt32) { self.id = id }
 
     func register(keyCode: UInt32, modifiers: UInt32, toggle: @escaping () -> Void) {
-        hotKeyToggleHandler = toggle
-        if !handlerInstalled {
+        if !hotKeyEventHandlerInstalled {
             var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: OSType(kEventHotKeyPressed))
             InstallEventHandler(GetApplicationEventTarget(), hotKeyEventHandler, 1, &eventType, nil, nil)
-            handlerInstalled = true
+            hotKeyEventHandlerInstalled = true
         }
+        unregister()
+        hotKeyHandlers[id] = toggle
+        let hotKeyID = EventHotKeyID(signature: OSType(0x4F42524B), id: id) // 'OBRK'
+        RegisterEventHotKey(keyCode, modifiers, hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
+    }
+
+    func unregister() {
         if let hotKeyRef {
             UnregisterEventHotKey(hotKeyRef)
             self.hotKeyRef = nil
         }
-        let hotKeyID = EventHotKeyID(signature: OSType(0x4F42524B), id: 1) // 'OBRK'
-        RegisterEventHotKey(keyCode, modifiers, hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
+        hotKeyHandlers[id] = nil
     }
 }
 
@@ -624,7 +635,8 @@ final class LensFrameView: NSView {
 final class LensWindowController: NSWindowController {
     private var scanTimer: Timer?
     private var followTimer: Timer?
-    private var inputCatcher: LensInputCatcherView!
+    private let escapeHotKey = GlobalHotKey(id: 2)
+    private let pinHotKey = GlobalHotKey(id: 3)
     private var frameView: LensFrameView!
     private var caption: NSTextField!
     private var isPinned = false {
@@ -660,6 +672,7 @@ final class LensWindowController: NSWindowController {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.hidesOnDeactivate = false
         panel.isMovableByWindowBackground = false
+        panel.ignoresMouseEvents = true
         super.init(window: panel)
         buildUI(in: panel)
     }
@@ -691,31 +704,25 @@ final class LensWindowController: NSWindowController {
         caption.frame = NSRect(x: 4, y: 0, width: Self.frameSize.width - 8, height: Self.captionHeight)
         captionBackground.addSubview(caption)
         self.caption = caption
-
-        let inputCatcher = LensInputCatcherView(frame: content.bounds)
-        inputCatcher.autoresizingMask = [.width, .height]
-        inputCatcher.onClick = { [weak self] in self?.isPinned.toggle() }
-        inputCatcher.onEscape = { [weak self] in self?.cancel() }
-        // Placed ON TOP (not behind): frameView/captionBackground are plain
-        // NSViews, and AppKit's default hit-testing picks the frontmost view
-        // whose *frame* contains the click regardless of what it actually
-        // draws — putting this transparent catcher behind them meant every
-        // click on the visible frame or caption was swallowed before ever
-        // reaching it.
-        content.addSubview(inputCatcher)
-        self.inputCatcher = inputCatcher
     }
 
     func show() {
         guard let panel = window else { return }
         reposition(to: NSEvent.mouseLocation)
-        panel.makeKeyAndOrderFront(nil)
-        panel.makeFirstResponder(inputCatcher)
+        panel.orderFrontRegardless()
 
-        // Follows the cursor continuously instead of requiring a manual
-        // drag each time — a click pins it in place (see isPinned) for the
-        // rare case the cursor needs to move away without taking the lens
-        // with it, e.g. to open another app's full-size image viewer.
+        // Carbon hotkeys rather than keyDown: the lens is a non-activating
+        // panel, so the frontmost app keeps keyboard focus and a plain
+        // keyDown for Escape never reaches it.
+        escapeHotKey.register(keyCode: UInt32(kVK_Escape), modifiers: 0) { [weak self] in
+            DispatchQueue.main.async { self?.cancel() }
+        }
+        pinHotKey.register(keyCode: UInt32(kVK_Space), modifiers: 0) { [weak self] in
+            DispatchQueue.main.async { self?.isPinned.toggle() }
+        }
+
+        // Pinning lets the cursor move away (e.g. to open another app's
+        // full-size image viewer) without taking the lens with it.
         followTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
             guard let self, !self.isPinned else { return }
             self.reposition(to: NSEvent.mouseLocation)
@@ -753,49 +760,38 @@ final class LensWindowController: NSWindowController {
 
     private func reposition(to mouse: NSPoint) {
         guard let panel = window else { return }
-        let origin = NSPoint(x: mouse.x - panel.frame.width / 2, y: mouse.y - panel.frame.height / 2)
+        let size = panel.frame.size
+        let gap: CGFloat = 6
+        // Up-left of the cursor so the arrow sits just past the lens's
+        // bottom-right corner instead of covering what's being aimed at;
+        // flips side where the screen edge leaves no room.
+        var origin = NSPoint(x: mouse.x - size.width - gap, y: mouse.y + gap)
+        if let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }) {
+            if origin.x < screen.frame.minX { origin.x = mouse.x + gap }
+            if origin.y + size.height > screen.frame.maxY { origin.y = mouse.y - size.height - gap }
+        }
         panel.setFrameOrigin(origin)
     }
 
-    private func found(_ payload: String) {
+    private func tearDown() {
+        escapeHotKey.unregister()
+        pinHotKey.unregister()
         followTimer?.invalidate()
         followTimer = nil
         scanTimer?.invalidate()
         scanTimer = nil
         window?.orderOut(nil)
+    }
+
+    private func found(_ payload: String) {
+        tearDown()
         onFound?(payload)
     }
 
     func cancel() {
         isCancelled = true
-        followTimer?.invalidate()
-        followTimer = nil
-        scanTimer?.invalidate()
-        scanTimer = nil
-        window?.orderOut(nil)
+        tearDown()
         onCancelled?()
-    }
-}
-
-/// A transparent view over the lens that turns a click into a pin/unpin
-/// toggle (see `LensWindowController.isPinned`) and Escape into a cancel
-/// callback.
-final class LensInputCatcherView: NSView {
-    var onClick: (() -> Void)?
-    var onEscape: (() -> Void)?
-
-    override var acceptsFirstResponder: Bool { true }
-
-    override func mouseDown(with event: NSEvent) {
-        onClick?()
-    }
-
-    override func keyDown(with event: NSEvent) {
-        if event.keyCode == UInt16(kVK_Escape) {
-            onEscape?()
-        } else {
-            super.keyDown(with: event)
-        }
     }
 }
 
@@ -1636,7 +1632,7 @@ final class SettingsWindowController: NSWindowController {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
-    private let hotKey = GlobalHotKey()
+    private let hotKey = GlobalHotKey(id: 1)
     private var lens: LensWindowController?
     private var preview: PreviewWindowController?
     private var settings: SettingsWindowController?

@@ -30,7 +30,7 @@
 |---|---|
 | `⌘⇧O` | تشغيل/إيقاف وضع المسح (قابل للتغيير من الإعدادات) |
 | المكبّر يتبع مؤشرك تلقائيًا | مرّره فوق رمز QR فيتعرف عليه فورًا ويعرض معاينة لمحتواه |
-| نقرة | تثبيت المكبّر بمكانه (يتلوّن برتقاليًا) — نقرة ثانية تعيده يتبع المؤشر |
+| `Space` مسافة | تثبيت المكبّر بمكانه (يتلوّن برتقاليًا) — ضغطة ثانية تعيده يتبع المؤشر |
 | `Esc` | إلغاء وضع المسح |
 | نقرة على نتيجة رابط | فتحه بالمتصفح — أو بتطبيق التواصل الاجتماعي المناسب إن وُجد |
 | نتيجة واي فاي | فتح إعدادات الواي فاي، مع نسخ أو إظهار كلمة المرور |
@@ -75,7 +75,7 @@ Built as a single Swift file with no Xcode project, running from the menu bar wi
 |---|---|
 | `⌘⇧O` | Start/stop scan mode (changeable in Settings) |
 | Magnifier follows your cursor automatically | Hover it over a QR code and it's recognized instantly, showing a preview of its content |
-| Click | Pins the magnifier in place (turns orange) — click again to resume following the cursor |
+| `Space` | Pins the magnifier in place (turns orange) — press again to resume following the cursor |
 | `Esc` | Cancel scan mode |
 | Click a link result | Opens it in the browser — or the matching social app if one applies |
 | Wi-Fi result | Opens Wi-Fi settings, with the password copyable or revealable |

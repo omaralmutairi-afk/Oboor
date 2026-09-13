@@ -571,7 +571,13 @@ final class LensWindowController: NSWindowController {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
-        panel.level = .floating
+        // .screenSaver, not .floating: aiming the lens at a QR embedded in a
+        // chat image often means opening that app's own full-size image
+        // viewer first, which can itself sit above a merely-floating window
+        // — leaving the lens stuck behind it, unusable. This is the highest
+        // conventional level, the same one screen savers and "always on
+        // top" utilities use to stay above literally everything.
+        panel.level = .screenSaver
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.hidesOnDeactivate = false
         panel.isMovableByWindowBackground = false
@@ -646,6 +652,12 @@ final class LensWindowController: NSWindowController {
         var scanInFlight = false
         scanTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
             guard let self, let window = self.window, !scanInFlight, !self.isDragging else { return }
+            // Re-assert front placement on every tick, not just at show():
+            // the user often needs to open another app's own full-size
+            // image viewer *after* the lens is already up (to see a small
+            // embedded QR clearly enough to aim at), which can otherwise
+            // raise itself above the lens later rather than before.
+            window.orderFrontRegardless()
             scanInFlight = true
             let frame = window.frame
             // Detached, not @MainActor: the capture + Vision pass is heavy

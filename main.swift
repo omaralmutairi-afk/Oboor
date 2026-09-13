@@ -354,7 +354,8 @@ enum PayloadClassifier {
                 return ParsedPayload(raw: raw, kind: .appStore(url))
             }
             let socialHosts = ["instagram.com", "twitter.com", "x.com", "tiktok.com", "facebook.com",
-                                "linkedin.com", "snapchat.com", "threads.net", "youtube.com", "wa.me", "t.me"]
+                                "linkedin.com", "snapchat.com", "threads.net", "youtube.com", "wa.me",
+                                "whatsapp.com", "t.me"]
             if socialHosts.contains(where: { host == $0 || host.hasSuffix("." + $0) }) {
                 return ParsedPayload(raw: raw, kind: .social(url, appScheme: socialAppScheme(for: url, host: host)))
             }
@@ -439,9 +440,21 @@ enum PayloadClassifier {
         if host == "twitter.com" || host == "x.com", let u = username {
             return URL(string: "twitter://user?screen_name=\(u)")
         }
-        if host.contains("wa.me") {
-            let number = url.path.replacingOccurrences(of: "/", with: "")
-            return URL(string: "whatsapp://send?phone=\(number)")
+        // WhatsApp's Mac app claims no associated domains, so universal
+        // links can't reach it — its own whatsapp:// scheme is the only way
+        // in. Channel links (whatsapp.com/channel/<id>) map onto that
+        // scheme's channel route; wa.me/<digits> maps to a chat. Any other
+        // wa.me path (wa.me/c/…, wa.me/message/…) isn't a phone number and
+        // must not be turned into a bogus send?phone= link.
+        if host.contains("whatsapp.com") || host.contains("wa.me") {
+            let parts = url.path.split(separator: "/").map(String.init)
+            if parts.count >= 2, parts[0] == "channel" {
+                return URL(string: "whatsapp://channel/\(parts[1])")
+            }
+            if host.contains("wa.me"), parts.count == 1, parts[0].allSatisfy(\.isNumber) {
+                return URL(string: "whatsapp://send?phone=\(parts[0])")
+            }
+            return nil
         }
         if host.contains("t.me"), let u = username {
             return URL(string: "tg://resolve?domain=\(u)")

@@ -102,7 +102,7 @@ enum L {
              genericOpenFailed, close,
              wifiShowPassword, wifiHidePassword,
              fieldName, fieldPhone, fieldEmail, fieldOrg, fieldPassword,
-             fieldTitle, fieldLocation, fieldStart, fieldEnd, fieldCoordinates, fieldMessage
+             fieldTitle, fieldLocation, fieldStart, fieldEnd, fieldCoordinates, fieldMessage, fieldLink
     }
 
     private static let table: [Key: (ar: String, en: String)] = [
@@ -146,6 +146,7 @@ enum L {
         .fieldEnd: ("النهاية", "End"),
         .fieldCoordinates: ("الإحداثيات", "Coordinates"),
         .fieldMessage: ("الرسالة", "Message"),
+        .fieldLink: ("الرابط", "Link"),
         .contactCardTitle: ("جهة اتصال", "Contact"),
         .contactAdd: ("إضافة إلى جهات الاتصال", "Add to Contacts"),
         .contactAdded: ("تمت الإضافة ✓", "Added ✓"),
@@ -793,7 +794,7 @@ final class PreviewPanel: NSPanel {
     override var canBecomeKey: Bool { true }
 }
 
-final class PreviewWindowController: NSWindowController {
+final class PreviewWindowController: NSWindowController, WKNavigationDelegate {
     private let payload: ParsedPayload
     private var webView: WKWebView?
     private var statusLabel: NSTextField?
@@ -967,15 +968,29 @@ final class PreviewWindowController: NSWindowController {
 
     private func buildBody(for kind: PayloadKind) -> NSView {
         switch kind {
-        case .url(let url), .appStore(let url), .social(let url, _):
+        case .url(let url), .social(let url, _):
             let wv = WKWebView(frame: .zero, configuration: {
                 let config = WKWebViewConfiguration()
                 config.websiteDataStore = .nonPersistent()
                 return config
             }())
+            // Defense in depth against the App Store bug below: never let a
+            // live preview page redirect straight into a native app on its
+            // own — only the explicit "Open in App" button may do that.
+            wv.navigationDelegate = self
             wv.load(URLRequest(url: url))
             webView = wv
             return wv
+
+        case .appStore(let url):
+            // Deliberately NOT a WKWebView: loading an apps.apple.com URL
+            // triggers macOS's own universal-link handling to silently
+            // launch the native App Store app (or the app itself, if
+            // already installed) with no click at all — confirmed by the
+            // user scanning a code for an app already on their Mac. The
+            // icon/name card (populated by fetchAppStoreInfo below) is a
+            // static preview; opening only ever happens via the button.
+            return verticallyCentered(detailStack([(L.t(.fieldLink), url.absoluteString)]))
 
         case .wifi(let ssid, let password, let hidden):
             var rows: [(String, String)] = [(L.t(.wifiCardTitle), ssid.isEmpty ? "—" : ssid)]
@@ -1256,6 +1271,19 @@ final class PreviewWindowController: NSWindowController {
         case .geo(_, let mapsURL): return mapsURL
         default: return nil
         }
+    }
+
+    /// Scheme allowlist for the live preview: only ever renders http/https
+    /// content, and cancels anything else outright rather than letting
+    /// WebKit decide — a page redirecting itself to a custom URL scheme
+    /// (a common "open in app" trick some sites embed) must not be able to
+    /// launch a native app on its own.
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        guard let scheme = navigationAction.request.url?.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
+            decisionHandler(.cancel)
+            return
+        }
+        decisionHandler(.allow)
     }
 
     private func fetchAppStoreInfo() {

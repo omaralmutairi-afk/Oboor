@@ -9,6 +9,7 @@ import ScreenCaptureKit
 
 extension Notification.Name {
     static let oboorSettingsChanged = Notification.Name("oboorSettingsChanged")
+    static let oboorHistoryChanged = Notification.Name("oboorHistoryChanged")
 }
 
 // MARK: - Settings
@@ -102,7 +103,8 @@ enum L {
              genericOpenFailed, close,
              wifiShowPassword, wifiHidePassword,
              fieldName, fieldPhone, fieldEmail, fieldOrg, fieldPassword,
-             fieldTitle, fieldLocation, fieldStart, fieldEnd, fieldCoordinates, fieldMessage, fieldLink
+             fieldTitle, fieldLocation, fieldStart, fieldEnd, fieldCoordinates, fieldMessage, fieldLink,
+             historyMenuItem, historyWindowTitle, historyEmpty, historyClear
     }
 
     private static let table: [Key: (ar: String, en: String)] = [
@@ -147,6 +149,10 @@ enum L {
         .fieldCoordinates: ("الإحداثيات", "Coordinates"),
         .fieldMessage: ("الرسالة", "Message"),
         .fieldLink: ("الرابط", "Link"),
+        .historyMenuItem: ("السجل الأخير…", "Recent History…"),
+        .historyWindowTitle: ("آخر الروابط — عُبور", "Recent Links — Oboor"),
+        .historyEmpty: ("لا يوجد سجل بعد", "No history yet"),
+        .historyClear: ("مسح السجل", "Clear History"),
         .contactCardTitle: ("جهة اتصال", "Contact"),
         .contactAdd: ("إضافة إلى جهات الاتصال", "Add to Contacts"),
         .contactAdded: ("تمت الإضافة ✓", "Added ✓"),
@@ -175,6 +181,51 @@ enum L {
     static func t(_ key: Key) -> String {
         let pair = table[key]!
         return SettingsStore.shared.language == .ar ? pair.ar : pair.en
+    }
+}
+
+// MARK: - Recent history
+
+struct HistoryEntry: Codable {
+    let url: String
+    let title: String
+    let date: Date
+}
+
+/// The last few links actually opened through a Preview window's buttons —
+/// deliberately not every scanned code, since "history" here means "where
+/// did I go," not "what did I scan."
+final class HistoryStore {
+    static let shared = HistoryStore()
+    private static let key = "recentHistory"
+    private static let maxCount = 5
+
+    private(set) var entries: [HistoryEntry] = []
+
+    private init() { load() }
+
+    func record(url: String, title: String) {
+        entries.insert(HistoryEntry(url: url, title: title, date: Date()), at: 0)
+        if entries.count > Self.maxCount { entries.removeLast(entries.count - Self.maxCount) }
+        save()
+        NotificationCenter.default.post(name: .oboorHistoryChanged, object: nil)
+    }
+
+    func clear() {
+        entries = []
+        save()
+        NotificationCenter.default.post(name: .oboorHistoryChanged, object: nil)
+    }
+
+    private func load() {
+        guard let data = UserDefaults.standard.data(forKey: Self.key),
+              let decoded = try? JSONDecoder().decode([HistoryEntry].self, from: data) else { return }
+        entries = decoded
+    }
+
+    private func save() {
+        guard let data = try? JSONEncoder().encode(entries) else { return }
+        UserDefaults.standard.set(data, forKey: Self.key)
     }
 }
 
@@ -1201,6 +1252,7 @@ final class PreviewWindowController: NSWindowController, WKNavigationDelegate {
     @objc private func openInBrowser() {
         guard let url = destinationURL() else { showStatus(L.t(.genericOpenFailed)); return }
         NSWorkspace.shared.open(url)
+        recordVisit(url: url)
     }
 
     @objc private func openPrivately() {
@@ -1210,6 +1262,19 @@ final class PreviewWindowController: NSWindowController, WKNavigationDelegate {
         let config = NSWorkspace.OpenConfiguration()
         config.arguments = ["--incognito", "--inprivate"]
         NSWorkspace.shared.open([url], withApplicationAt: defaultBrowser, configuration: config, completionHandler: nil)
+        recordVisit(url: url)
+    }
+
+    /// History only ever tracks actual link visits (url/appStore/social),
+    /// not every action that calls this — email/phone/sms/geo results also
+    /// route their button through openInBrowser() but aren't "links."
+    private func recordVisit(url: URL) {
+        switch payload.kind {
+        case .url, .appStore, .social:
+            HistoryStore.shared.record(url: url.absoluteString, title: titleLabel?.stringValue ?? url.host ?? url.absoluteString)
+        default:
+            break
+        }
     }
 
     @objc private func copyLink() {
@@ -1223,10 +1288,14 @@ final class PreviewWindowController: NSWindowController, WKNavigationDelegate {
     @objc private func openInApp() {
         switch payload.kind {
         case .social(_, let scheme):
-            if let scheme { NSWorkspace.shared.open(scheme) }
+            if let scheme {
+                NSWorkspace.shared.open(scheme)
+                if let url = destinationURL() { recordVisit(url: url) }
+            }
         case .appStore:
             if let bundleID = appStoreBundleID, let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
                 NSWorkspace.shared.open(appURL)
+                if let url = destinationURL() { recordVisit(url: url) }
             }
         default:
             break
@@ -1366,6 +1435,97 @@ extension ScreenCapturePermission {
     }
 }
 
+// MARK: - History window
+
+final class HistoryWindowController: NSWindowController {
+    private var stack: NSStackView?
+
+    init() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 280),
+            styleMask: [.titled, .closable],
+            backing: .buffered, defer: false
+        )
+        window.title = L.t(.historyWindowTitle)
+        window.isReleasedWhenClosed = false
+        window.center()
+        super.init(window: window)
+        buildUI()
+        NotificationCenter.default.addObserver(self, selector: #selector(reload), name: .oboorHistoryChanged, object: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func buildUI() {
+        guard let content = window?.contentView else { return }
+        let root = NSStackView()
+        root.orientation = .vertical
+        root.alignment = .leading
+        root.spacing = 12
+        root.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
+        root.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(root)
+        NSLayoutConstraint.activate([
+            root.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            root.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            root.topAnchor.constraint(equalTo: content.topAnchor),
+        ])
+        stack = root
+        reload()
+    }
+
+    @objc private func reload() {
+        guard let stack else { return }
+        stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+
+        let entries = HistoryStore.shared.entries
+        guard !entries.isEmpty else {
+            let label = NSTextField(labelWithString: L.t(.historyEmpty))
+            label.textColor = .secondaryLabelColor
+            stack.addArrangedSubview(label)
+            return
+        }
+
+        for entry in entries {
+            let row = NSStackView()
+            row.orientation = .vertical
+            row.alignment = .leading
+            row.spacing = 2
+
+            let title = NSButton(title: entry.title, target: self, action: #selector(openEntry(_:)))
+            title.bezelStyle = .inline
+            title.isBordered = false
+            title.contentTintColor = .linkColor
+            title.identifier = NSUserInterfaceItemIdentifier(entry.url)
+            title.lineBreakMode = .byTruncatingTail
+
+            let sub = NSTextField(labelWithString: entry.url)
+            sub.font = .systemFont(ofSize: 10)
+            sub.textColor = .secondaryLabelColor
+            sub.lineBreakMode = .byTruncatingMiddle
+
+            row.addArrangedSubview(title)
+            row.addArrangedSubview(sub)
+            row.translatesAutoresizingMaskIntoConstraints = false
+            stack.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
+
+        let clear = NSButton(title: L.t(.historyClear), target: self, action: #selector(clearHistory))
+        clear.bezelStyle = .rounded
+        stack.addArrangedSubview(clear)
+    }
+
+    @objc private func openEntry(_ sender: NSButton) {
+        guard let urlString = sender.identifier?.rawValue, let url = URL(string: urlString) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    @objc private func clearHistory() {
+        HistoryStore.shared.clear()
+    }
+}
+
 // MARK: - Settings window
 
 final class SettingsWindowController: NSWindowController {
@@ -1455,9 +1615,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lens: LensWindowController?
     private var preview: PreviewWindowController?
     private var settings: SettingsWindowController?
+    private var history: HistoryWindowController?
     private var registeredHotKey: (code: UInt32, modifiers: UInt32)?
     private var settingsMenuItem: NSMenuItem!
     private var scanMenuItem: NSMenuItem!
+    private var historyMenuItem: NSMenuItem!
     private var quitMenuItem: NSMenuItem!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -1469,10 +1631,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.image = NSImage(systemSymbolName: "qrcode.viewfinder", accessibilityDescription: L.t(.statusItemAccessibility))
 
         scanMenuItem = NSMenuItem(title: L.t(.scanNowMenuItem), action: #selector(startScan), keyEquivalent: "")
+        historyMenuItem = NSMenuItem(title: L.t(.historyMenuItem), action: #selector(showHistory), keyEquivalent: "")
         settingsMenuItem = NSMenuItem(title: L.t(.settingsMenuItem), action: #selector(showSettings), keyEquivalent: "")
         quitMenuItem = NSMenuItem(title: L.t(.quitMenuItem), action: #selector(quit), keyEquivalent: "")
         let menu = NSMenu()
         menu.addItem(scanMenuItem)
+        menu.addItem(historyMenuItem)
         menu.addItem(.separator())
         menu.addItem(settingsMenuItem)
         menu.addItem(.separator())
@@ -1491,6 +1655,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func settingsChanged() {
         registerHotKey()
         scanMenuItem.title = L.t(.scanNowMenuItem)
+        historyMenuItem.title = L.t(.historyMenuItem)
         settingsMenuItem.title = L.t(.settingsMenuItem)
         quitMenuItem.title = L.t(.quitMenuItem)
         statusItem.button?.image = NSImage(systemSymbolName: "qrcode.viewfinder", accessibilityDescription: L.t(.statusItemAccessibility))
@@ -1559,6 +1724,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         settings?.showWindow(nil)
         settings?.window?.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func showHistory() {
+        if history == nil { history = HistoryWindowController() }
+        NSApp.activate(ignoringOtherApps: true)
+        history?.showWindow(nil)
+        history?.window?.makeKeyAndOrderFront(nil)
     }
 
     @objc private func quit() {

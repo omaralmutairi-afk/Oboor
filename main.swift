@@ -1460,7 +1460,7 @@ final class HistoryWindowController: NSWindowController {
         guard let content = window?.contentView else { return }
         let root = NSStackView()
         root.orientation = .vertical
-        root.alignment = .leading
+        root.alignment = .centerX
         root.spacing = 12
         root.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
         root.translatesAutoresizingMaskIntoConstraints = false
@@ -1498,17 +1498,29 @@ final class HistoryWindowController: NSWindowController {
             title.contentTintColor = .linkColor
             title.identifier = NSUserInterfaceItemIdentifier(entry.url)
             title.lineBreakMode = .byTruncatingTail
+            title.alignment = .center
 
             let sub = NSTextField(labelWithString: entry.url)
             sub.font = .systemFont(ofSize: 10)
             sub.textColor = .secondaryLabelColor
             sub.lineBreakMode = .byTruncatingMiddle
+            sub.alignment = .center
 
             row.addArrangedSubview(title)
             row.addArrangedSubview(sub)
+            row.alignment = .centerX
             row.translatesAutoresizingMaskIntoConstraints = false
             stack.addArrangedSubview(row)
-            row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+            // Subtracting the stack's own edgeInsets here matters: without
+            // it this constraint (row width = stack's full width) fights
+            // the insets NSStackView applies internally — two required
+            // constraints demanding incompatible widths — and Auto Layout's
+            // arbitrary resolution showed up as text clipped a few points
+            // in from the true edge instead of respecting the padding.
+            row.widthAnchor.constraint(
+                equalTo: stack.widthAnchor,
+                constant: -(stack.edgeInsets.left + stack.edgeInsets.right)
+            ).isActive = true
         }
 
         let clear = NSButton(title: L.t(.historyClear), target: self, action: #selector(clearHistory))
@@ -1529,9 +1541,14 @@ final class HistoryWindowController: NSWindowController {
 // MARK: - Settings window
 
 final class SettingsWindowController: NSWindowController {
+    /// Lets the app delegate own the single shared HistoryWindowController
+    /// instance — Settings just asks for it, the same pattern
+    /// applicationDidFinishLaunching already uses for the menu item.
+    var onShowHistory: (() -> Void)?
+
     init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 380, height: 200),
+            contentRect: NSRect(x: 0, y: 0, width: 380, height: 240),
             styleMask: [.titled, .closable],
             backing: .buffered, defer: false
         )
@@ -1596,6 +1613,14 @@ final class SettingsWindowController: NSWindowController {
         let loginCheckbox = NSButton(checkboxWithTitle: L.t(.launchAtLoginCheckbox), target: self, action: #selector(loginToggled(_:)))
         loginCheckbox.state = LoginItem.isEnabled ? .on : .off
         grid.addArrangedSubview(loginCheckbox)
+
+        // Reaching History from here (not just the menu bar dropdown)
+        // matters because opening Oboor.app itself — a double-click on
+        // Desktop — lands here via applicationShouldHandleReopen, and that
+        // was the only door into the app the user had in mind.
+        let historyButton = NSButton(title: L.t(.historyMenuItem), target: self, action: #selector(openHistory))
+        historyButton.bezelStyle = .rounded
+        grid.addArrangedSubview(historyButton)
     }
 
     @objc private func languageChanged(_ sender: NSPopUpButton) {
@@ -1604,6 +1629,10 @@ final class SettingsWindowController: NSWindowController {
 
     @objc private func loginToggled(_ sender: NSButton) {
         LoginItem.setEnabled(sender.state == .on)
+    }
+
+    @objc private func openHistory() {
+        onShowHistory?()
     }
 }
 
@@ -1720,7 +1749,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showSettings() {
-        if settings == nil { settings = SettingsWindowController() }
+        if settings == nil {
+            settings = SettingsWindowController()
+            settings?.onShowHistory = { [weak self] in self?.showHistory() }
+        }
         NSApp.activate(ignoringOtherApps: true)
         settings?.showWindow(nil)
         settings?.window?.makeKeyAndOrderFront(nil)

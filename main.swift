@@ -854,24 +854,16 @@ enum CalendarSaver {
 
 // MARK: - Shared centering helpers
 
-/// Wraps a full-width horizontal NSStackView (a header row, an action button
-/// row, a history entry row) in a container that centers it instead of
-/// leaving it packed at the leading edge, which is what a plain NSStackView
-/// does on its own. Top/bottom are pinned directly (not centered) since
-/// these rows' own height already matches their content — only horizontal
-/// position needs correcting here. The container's width is set here, equal
-/// to `stack`'s own width minus `stack.edgeInsets` — computing that at each
-/// call site (as an earlier version of this code did per-callsite) is easy
-/// to get wrong: a required width constraint that doesn't account for the
-/// stack's insets fights the insets' own constraints, and the conflict
-/// resolves as content clipped a few points in from the true edge instead
-/// of respecting the padding.
-// Appends the container to `stack` itself BEFORE activating: the width
-// constraint references `stack`, and AppKit throws NSGenericException (no
-// common ancestor) if the container isn't in the stack's hierarchy yet —
-// which silently aborted the whole preview build when a code was decoded.
-@discardableResult
-func centeredHorizontally(_ view: NSView, in stack: NSStackView) -> NSView {
+/// Adds `view` to `stack`, horizontally centered inside a container that
+/// spans the stack's usable width (its width minus `edgeInsets`, so the
+/// container never fights the stack's own inset constraints). Top/bottom are
+/// pinned, since these rows' height already matches their content.
+/// The container is appended to `stack` before any constraint is activated:
+/// the width constraint references `stack`, and AppKit throws
+/// NSGenericException ("no common ancestor") otherwise — which once aborted
+/// every preview build right after a code was decoded. Returns nothing, so a
+/// caller can't add the container to the stack a second time.
+func addCenteredHorizontally(_ view: NSView, to stack: NSStackView) {
     let container = NSView()
     view.translatesAutoresizingMaskIntoConstraints = false
     container.translatesAutoresizingMaskIntoConstraints = false
@@ -885,16 +877,13 @@ func centeredHorizontally(_ view: NSView, in stack: NSStackView) -> NSView {
         view.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor),
         container.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -(stack.edgeInsets.left + stack.edgeInsets.right)),
     ])
-    return container
 }
 
-/// Same idea as `centeredHorizontally`, but for a detail card (a compact
-/// vertical stack of label/value rows) that should also be centered
-/// *vertically* within a body area taller than its own content — otherwise
-/// it sits pinned to the top-leading corner of whatever space is available.
-// Also appends to `stack` before activating — same reason as above.
-@discardableResult
-func centered(_ view: NSView, in stack: NSStackView) -> NSView {
+/// Like `addCenteredHorizontally`, for a detail card (a compact stack of
+/// label/value rows) that is also centered vertically, inside a container at
+/// least `minHeight` tall, instead of sitting in its top-leading corner.
+/// Same append-before-activate ordering, for the same reason.
+func addCentered(_ view: NSView, to stack: NSStackView, minHeight: CGFloat) {
     let container = NSView()
     view.translatesAutoresizingMaskIntoConstraints = false
     container.translatesAutoresizingMaskIntoConstraints = false
@@ -906,8 +895,8 @@ func centered(_ view: NSView, in stack: NSStackView) -> NSView {
         view.leadingAnchor.constraint(greaterThanOrEqualTo: container.leadingAnchor, constant: 8),
         view.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -8),
         container.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -(stack.edgeInsets.left + stack.edgeInsets.right)),
+        container.heightAnchor.constraint(greaterThanOrEqualToConstant: minHeight),
     ])
-    return container
 }
 
 // MARK: - Preview window
@@ -929,6 +918,7 @@ final class PreviewWindowController: NSWindowController, WKNavigationDelegate {
     private var wifiPasswordRevealed = false
     private var actionsStack: NSStackView?
     private var appStoreBundleID: String?
+    private static let bodyMinHeight: CGFloat = 200
 
     init(payload: ParsedPayload) {
         self.payload = payload
@@ -1006,24 +996,13 @@ final class PreviewWindowController: NSWindowController, WKNavigationDelegate {
         header.addArrangedSubview(icon)
         header.addArrangedSubview(textStack)
 
-        centeredHorizontally(header, in: root)
+        addCenteredHorizontally(header, to: root)
 
         root.addArrangedSubview(NSBox.hairline())
 
-        // Body — the web preview and scrollable text bodies fill root's full
-        // width deliberately (edge-to-edge content); the detail-card bodies
-        // (Wi-Fi, contact, App Store, etc.) already size and center
-        // themselves correctly via `centered(_:in:)` inside buildBody, so
-        // they must NOT also get this width constraint — two required width
-        // constraints on the same view is exactly the bug that caused the
-        // history-row clipping this same review pass found.
-        let body = buildBody(for: payload.kind, root: root)
-        if body.superview == nil {
-            body.translatesAutoresizingMaskIntoConstraints = false
-            root.addArrangedSubview(body)
-            body.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
-        }
-        body.heightAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
+        // Body — addBody attaches and sizes whichever view fits the payload
+        // (live web preview, scrollable text, or a centered detail card).
+        addBody(for: payload.kind, to: root)
 
         root.addArrangedSubview(NSBox.hairline())
 
@@ -1040,7 +1019,7 @@ final class PreviewWindowController: NSWindowController, WKNavigationDelegate {
         actions.spacing = 8
         buildActionButtons(for: payload.kind).forEach { actions.addArrangedSubview($0) }
         actionsStack = actions
-        centeredHorizontally(actions, in: root)
+        addCenteredHorizontally(actions, to: root)
 
         if payload.kind.isAppStore {
             fetchAppStoreInfo()
@@ -1095,7 +1074,7 @@ final class PreviewWindowController: NSWindowController, WKNavigationDelegate {
         }
     }
 
-    private func buildBody(for kind: PayloadKind, root: NSStackView) -> NSView {
+    private func addBody(for kind: PayloadKind, to root: NSStackView) {
         switch kind {
         case .url(let url), .social(let url, _):
             let wv = WKWebView(frame: .zero, configuration: {
@@ -1109,7 +1088,7 @@ final class PreviewWindowController: NSWindowController, WKNavigationDelegate {
             wv.navigationDelegate = self
             wv.load(URLRequest(url: url))
             webView = wv
-            return wv
+            addFullWidthBody(wv, to: root)
 
         case .appStore(let url):
             // Deliberately NOT a WKWebView: loading an apps.apple.com URL
@@ -1119,7 +1098,7 @@ final class PreviewWindowController: NSWindowController, WKNavigationDelegate {
             // user scanning a code for an app already on their Mac. The
             // icon/name card (populated by fetchAppStoreInfo below) is a
             // static preview; opening only ever happens via the button.
-            return centered(detailStack([(L.t(.fieldLink), url.absoluteString)]), in: root)
+            addCentered(detailStack([(L.t(.fieldLink), url.absoluteString)]), to: root, minHeight: Self.bodyMinHeight)
 
         case .wifi(let ssid, let password, let hidden):
             var rows: [(String, String)] = [(L.t(.wifiCardTitle), ssid.isEmpty ? "—" : ssid)]
@@ -1131,38 +1110,38 @@ final class PreviewWindowController: NSWindowController, WKNavigationDelegate {
                 wifiPasswordLabel = valueField
                 stack.addArrangedSubview(row)
             }
-            return centered(stack, in: root)
+            addCentered(stack, to: root, minHeight: Self.bodyMinHeight)
 
         case .contact(let name, let phone, let email, let org):
-            return centered(detailStack([
+            addCentered(detailStack([
                 (L.t(.fieldName), name),
                 (L.t(.fieldPhone), phone),
                 (L.t(.fieldEmail), email),
                 (L.t(.fieldOrg), org),
-            ].compactMap { label, value in value.map { (label, $0) } }), in: root)
+            ].compactMap { label, value in value.map { (label, $0) } }), to: root, minHeight: Self.bodyMinHeight)
 
         case .email(let address):
-            return centered(detailStack([(L.t(.fieldEmail), address)]), in: root)
+            addCentered(detailStack([(L.t(.fieldEmail), address)]), to: root, minHeight: Self.bodyMinHeight)
 
         case .phone(let number):
-            return centered(detailStack([(L.t(.fieldPhone), number)]), in: root)
+            addCentered(detailStack([(L.t(.fieldPhone), number)]), to: root, minHeight: Self.bodyMinHeight)
 
         case .sms(let url):
-            return centered(detailStack([(L.t(.fieldMessage), url.absoluteString)]), in: root)
+            addCentered(detailStack([(L.t(.fieldMessage), url.absoluteString)]), to: root, minHeight: Self.bodyMinHeight)
 
         case .geo(let coords, _):
-            return centered(detailStack([(L.t(.fieldCoordinates), coords)]), in: root)
+            addCentered(detailStack([(L.t(.fieldCoordinates), coords)]), to: root, minHeight: Self.bodyMinHeight)
 
         case .calendarEvent(let title, let location, let start, let end):
             let df = DateFormatter()
             df.dateStyle = .medium
             df.timeStyle = .short
-            return centered(detailStack([
+            addCentered(detailStack([
                 (L.t(.fieldTitle), title),
                 (L.t(.fieldLocation), location),
                 (L.t(.fieldStart), start.map(df.string)),
                 (L.t(.fieldEnd), end.map(df.string)),
-            ].compactMap { label, value in value.map { (label, $0) } }), in: root)
+            ].compactMap { label, value in value.map { (label, $0) } }), to: root, minHeight: Self.bodyMinHeight)
 
         case .text(let value):
             let scroll = NSScrollView()
@@ -1173,8 +1152,19 @@ final class PreviewWindowController: NSWindowController, WKNavigationDelegate {
             textView.isEditable = false
             textView.font = .systemFont(ofSize: 13)
             scroll.documentView = textView
-            return scroll
+            addFullWidthBody(scroll, to: root)
         }
+    }
+
+    /// Live web preview and plain-text bodies span root's width, with the
+    /// same minimum height as the detail cards.
+    private func addFullWidthBody(_ view: NSView, to root: NSStackView) {
+        view.translatesAutoresizingMaskIntoConstraints = false
+        root.addArrangedSubview(view)
+        NSLayoutConstraint.activate([
+            view.widthAnchor.constraint(equalTo: root.widthAnchor),
+            view.heightAnchor.constraint(greaterThanOrEqualToConstant: Self.bodyMinHeight),
+        ])
     }
 
     private func makeRow(label: String, value: String) -> (row: NSView, valueField: NSTextField) {
@@ -1528,10 +1518,7 @@ final class HistoryWindowController: NSWindowController {
             row.addArrangedSubview(title)
             row.addArrangedSubview(sub)
 
-            // Same helper PreviewWindowController uses for its header/action
-            // rows — handles the stack's edgeInsets correctly instead of
-            // reimplementing that arithmetic here.
-            centeredHorizontally(row, in: stack)
+            addCenteredHorizontally(row, to: stack)
         }
 
         let clear = NSButton(title: L.t(.historyClear), target: self, action: #selector(clearHistory))

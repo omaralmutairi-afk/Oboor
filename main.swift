@@ -866,11 +866,17 @@ enum CalendarSaver {
 /// stack's insets fights the insets' own constraints, and the conflict
 /// resolves as content clipped a few points in from the true edge instead
 /// of respecting the padding.
+// Appends the container to `stack` itself BEFORE activating: the width
+// constraint references `stack`, and AppKit throws NSGenericException (no
+// common ancestor) if the container isn't in the stack's hierarchy yet —
+// which silently aborted the whole preview build when a code was decoded.
+@discardableResult
 func centeredHorizontally(_ view: NSView, in stack: NSStackView) -> NSView {
     let container = NSView()
     view.translatesAutoresizingMaskIntoConstraints = false
     container.translatesAutoresizingMaskIntoConstraints = false
     container.addSubview(view)
+    stack.addArrangedSubview(container)
     NSLayoutConstraint.activate([
         view.centerXAnchor.constraint(equalTo: container.centerXAnchor),
         view.topAnchor.constraint(equalTo: container.topAnchor),
@@ -886,11 +892,14 @@ func centeredHorizontally(_ view: NSView, in stack: NSStackView) -> NSView {
 /// vertical stack of label/value rows) that should also be centered
 /// *vertically* within a body area taller than its own content — otherwise
 /// it sits pinned to the top-leading corner of whatever space is available.
+// Also appends to `stack` before activating — same reason as above.
+@discardableResult
 func centered(_ view: NSView, in stack: NSStackView) -> NSView {
     let container = NSView()
     view.translatesAutoresizingMaskIntoConstraints = false
     container.translatesAutoresizingMaskIntoConstraints = false
     container.addSubview(view)
+    stack.addArrangedSubview(container)
     NSLayoutConstraint.activate([
         view.centerXAnchor.constraint(equalTo: container.centerXAnchor),
         view.centerYAnchor.constraint(equalTo: container.centerYAnchor),
@@ -997,8 +1006,7 @@ final class PreviewWindowController: NSWindowController, WKNavigationDelegate {
         header.addArrangedSubview(icon)
         header.addArrangedSubview(textStack)
 
-        let headerContainer = centeredHorizontally(header, in: root)
-        root.addArrangedSubview(headerContainer)
+        centeredHorizontally(header, in: root)
 
         root.addArrangedSubview(NSBox.hairline())
 
@@ -1010,13 +1018,10 @@ final class PreviewWindowController: NSWindowController, WKNavigationDelegate {
         // constraints on the same view is exactly the bug that caused the
         // history-row clipping this same review pass found.
         let body = buildBody(for: payload.kind, root: root)
-        body.translatesAutoresizingMaskIntoConstraints = false
-        root.addArrangedSubview(body)
-        switch payload.kind {
-        case .url, .social, .text:
+        if body.superview == nil {
+            body.translatesAutoresizingMaskIntoConstraints = false
+            root.addArrangedSubview(body)
             body.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
-        default:
-            break
         }
         body.heightAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
 
@@ -1035,8 +1040,7 @@ final class PreviewWindowController: NSWindowController, WKNavigationDelegate {
         actions.spacing = 8
         buildActionButtons(for: payload.kind).forEach { actions.addArrangedSubview($0) }
         actionsStack = actions
-        let actionsContainer = centeredHorizontally(actions, in: root)
-        root.addArrangedSubview(actionsContainer)
+        centeredHorizontally(actions, in: root)
 
         if payload.kind.isAppStore {
             fetchAppStoreInfo()
@@ -1527,7 +1531,7 @@ final class HistoryWindowController: NSWindowController {
             // Same helper PreviewWindowController uses for its header/action
             // rows — handles the stack's edgeInsets correctly instead of
             // reimplementing that arithmetic here.
-            stack.addArrangedSubview(centeredHorizontally(row, in: stack))
+            centeredHorizontally(row, in: stack)
         }
 
         let clear = NSButton(title: L.t(.historyClear), target: self, action: #selector(clearHistory))

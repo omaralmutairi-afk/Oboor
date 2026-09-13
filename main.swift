@@ -91,7 +91,7 @@ enum L {
     enum Key {
         case statusItemAccessibility, scanNowMenuItem, settingsMenuItem, quitMenuItem,
              settingsWindowTitle, hotkeyRow, languageRow, launchAtLoginCheckbox, pressCombo,
-             lensCaption, screenRecordingAlertTitle, screenRecordingAlertBody,
+             lensCaption, lensCaptionPinned, screenRecordingAlertTitle, screenRecordingAlertBody,
              screenRecordingAlertOpenSettings, screenRecordingAlertCancel,
              previewTitle, openInBrowser, openPrivately, copyLink, copied,
              openInApp, openInAppStore, loadingAppStore,
@@ -118,6 +118,7 @@ enum L {
         .launchAtLoginCheckbox: ("تشغيل عُبور تلقائيًا عند بدء تشغيل الماك", "Launch Oboor automatically at startup"),
         .pressCombo: ("اضغط الاختصار…", "Press a shortcut…"),
         .lensCaption: ("وجّه الإطار على رمز QR — Esc للإلغاء", "Aim the frame at a QR code — Esc to cancel"),
+        .lensCaptionPinned: ("مثبّت — انقر للمتابعة", "Pinned — click to resume following"),
         .screenRecordingAlertTitle: ("عُبور يحتاج صلاحية تسجيل الشاشة", "Oboor needs Screen Recording access"),
         .screenRecordingAlertBody: ("عشان يقرأ رمز QR من شاشتك، فعّل الصلاحية من إعدادات النظام ثم أعد فتح عُبور.", "To read a QR code from your screen, grant the permission in System Settings, then relaunch Oboor."),
         .screenRecordingAlertOpenSettings: ("فتح الإعدادات", "Open Settings"),
@@ -578,11 +579,17 @@ final class LensPanel: NSPanel {
 /// otherwise fully transparent view, so the capture underneath is never
 /// obscured by the frame's own chrome.
 final class LensFrameView: NSView {
+    var isPinned = false {
+        didSet { needsDisplay = true }
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         NSColor.clear.set()
         dirtyRect.fill()
 
-        let accent = NSColor(calibratedRed: 0.20, green: 0.80, blue: 0.72, alpha: 1.0)
+        let accent = isPinned
+            ? NSColor(calibratedRed: 0.95, green: 0.65, blue: 0.15, alpha: 1.0)
+            : NSColor(calibratedRed: 0.20, green: 0.80, blue: 0.72, alpha: 1.0)
         let inset: CGFloat = 6
         let armLength: CGFloat = 26
         let lineWidth: CGFloat = 4
@@ -616,9 +623,16 @@ final class LensFrameView: NSView {
 
 final class LensWindowController: NSWindowController {
     private var scanTimer: Timer?
-    private var dragOffset: NSPoint = .zero
-    private var dragCatcher: DraggableBackgroundView!
-    private var isDragging = false
+    private var followTimer: Timer?
+    private var inputCatcher: LensInputCatcherView!
+    private var frameView: LensFrameView!
+    private var caption: NSTextField!
+    private var isPinned = false {
+        didSet {
+            frameView.isPinned = isPinned
+            caption.stringValue = L.t(isPinned ? .lensCaptionPinned : .lensCaption)
+        }
+    }
     private var isCancelled = false
     var onFound: ((String) -> Void)?
     var onCancelled: (() -> Void)?
@@ -658,6 +672,7 @@ final class LensWindowController: NSWindowController {
         let frameView = LensFrameView(frame: NSRect(x: 0, y: Self.captionHeight, width: Self.frameSize.width, height: Self.frameSize.height))
         frameView.autoresizingMask = [.width, .height]
         content.addSubview(frameView)
+        self.frameView = frameView
 
         // A solid translucent color rather than NSVisualEffectView: the live
         // blur re-samples the desktop behind the window every frame, which is
@@ -675,48 +690,41 @@ final class LensWindowController: NSWindowController {
         caption.alignment = .center
         caption.frame = NSRect(x: 4, y: 0, width: Self.frameSize.width - 8, height: Self.captionHeight)
         captionBackground.addSubview(caption)
+        self.caption = caption
 
-        let dragCatcher = DraggableBackgroundView(frame: content.bounds)
-        dragCatcher.autoresizingMask = [.width, .height]
-        dragCatcher.onDrag = { [weak self] delta in
-            guard let self, let window = self.window else { return }
-            var origin = window.frame.origin
-            origin.x += delta.x
-            origin.y += delta.y
-            window.setFrameOrigin(origin)
-        }
-        dragCatcher.onDragStart = { [weak self] in self?.isDragging = true }
-        dragCatcher.onDragEnd = { [weak self] in self?.isDragging = false }
-        dragCatcher.onEscape = { [weak self] in self?.cancel() }
-        // Safety net for onDragEnd: if focus gets stolen mid-drag (Mission
-        // Control, Cmd+Tab, a notification banner) the panel never gets a
-        // mouseUp, so isDragging could otherwise stay stuck true forever and
-        // permanently pause scanning.
-        NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: panel, queue: .main) { [weak self] _ in
-            self?.isDragging = false
-        }
+        let inputCatcher = LensInputCatcherView(frame: content.bounds)
+        inputCatcher.autoresizingMask = [.width, .height]
+        inputCatcher.onClick = { [weak self] in self?.isPinned.toggle() }
+        inputCatcher.onEscape = { [weak self] in self?.cancel() }
         // Placed ON TOP (not behind): frameView/captionBackground are plain
         // NSViews, and AppKit's default hit-testing picks the frontmost view
         // whose *frame* contains the click regardless of what it actually
         // draws — putting this transparent catcher behind them meant every
         // click on the visible frame or caption was swallowed before ever
-        // reaching it, so the lens couldn't be dragged at all.
-        content.addSubview(dragCatcher)
-        self.dragCatcher = dragCatcher
+        // reaching it.
+        content.addSubview(inputCatcher)
+        self.inputCatcher = inputCatcher
     }
 
     func show() {
         guard let panel = window else { return }
-        let mouse = NSEvent.mouseLocation
-        let origin = NSPoint(x: mouse.x - panel.frame.width / 2, y: mouse.y - panel.frame.height / 2)
-        panel.setFrameOrigin(origin)
+        reposition(to: NSEvent.mouseLocation)
         panel.makeKeyAndOrderFront(nil)
-        panel.makeFirstResponder(dragCatcher)
+        panel.makeFirstResponder(inputCatcher)
+
+        // Follows the cursor continuously instead of requiring a manual
+        // drag each time — a click pins it in place (see isPinned) for the
+        // rare case the cursor needs to move away without taking the lens
+        // with it, e.g. to open another app's full-size image viewer.
+        followTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            guard let self, !self.isPinned else { return }
+            self.reposition(to: NSEvent.mouseLocation)
+        }
 
         let windowID = CGWindowID(panel.windowNumber)
         var scanInFlight = false
         scanTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
-            guard let self, let window = self.window, !scanInFlight, !self.isDragging else { return }
+            guard let self, let window = self.window, !scanInFlight else { return }
             // Re-assert front placement on every tick, not just at show():
             // the user often needs to open another app's own full-size
             // image viewer *after* the lens is already up (to see a small
@@ -728,8 +736,8 @@ final class LensWindowController: NSWindowController {
             // Detached, not @MainActor: the capture + Vision pass is heavy
             // enough that running it on the main thread stalled the run loop
             // for the ~0.2s tick, which showed up as jitter/ghosting while
-            // the user was actively dragging the lens. Only the tiny bit that
-            // touches `self`/the window hops back to the main actor.
+            // the lens was moving. Only the tiny bit that touches
+            // `self`/the window hops back to the main actor.
             Task.detached(priority: .userInitiated) {
                 let payload = await QRDetector.scan(rect: frame, excludingWindowID: windowID)
                 await MainActor.run {
@@ -743,7 +751,15 @@ final class LensWindowController: NSWindowController {
         }
     }
 
+    private func reposition(to mouse: NSPoint) {
+        guard let panel = window else { return }
+        let origin = NSPoint(x: mouse.x - panel.frame.width / 2, y: mouse.y - panel.frame.height / 2)
+        panel.setFrameOrigin(origin)
+    }
+
     private func found(_ payload: String) {
+        followTimer?.invalidate()
+        followTimer = nil
         scanTimer?.invalidate()
         scanTimer = nil
         window?.orderOut(nil)
@@ -752,6 +768,8 @@ final class LensWindowController: NSWindowController {
 
     func cancel() {
         isCancelled = true
+        followTimer?.invalidate()
+        followTimer = nil
         scanTimer?.invalidate()
         scanTimer = nil
         window?.orderOut(nil)
@@ -759,37 +777,17 @@ final class LensWindowController: NSWindowController {
     }
 }
 
-/// A transparent view that turns click-drag into a delta callback and Escape
-/// into a callback — lets the borderless lens panel be repositioned and
-/// dismissed without any title bar.
-final class DraggableBackgroundView: NSView {
-    var onDrag: ((NSPoint) -> Void)?
-    var onDragStart: (() -> Void)?
-    var onDragEnd: (() -> Void)?
+/// A transparent view over the lens that turns a click into a pin/unpin
+/// toggle (see `LensWindowController.isPinned`) and Escape into a cancel
+/// callback.
+final class LensInputCatcherView: NSView {
+    var onClick: (() -> Void)?
     var onEscape: (() -> Void)?
-    private var lastDragLocation: NSPoint?
 
     override var acceptsFirstResponder: Bool { true }
 
     override func mouseDown(with event: NSEvent) {
-        lastDragLocation = NSEvent.mouseLocation
-        onDragStart?()
-    }
-
-    // Screen coordinates, never `event.locationInWindow`: the window moves
-    // as a result of this very drag, so a window-relative origin shifts out
-    // from under the next event. Each move cancelled the previous one on the
-    // following event, which read as the lens vibrating and double-imaging.
-    override func mouseDragged(with event: NSEvent) {
-        guard let last = lastDragLocation else { return }
-        let current = NSEvent.mouseLocation
-        onDrag?(NSPoint(x: current.x - last.x, y: current.y - last.y))
-        lastDragLocation = current
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        lastDragLocation = nil
-        onDragEnd?()
+        onClick?()
     }
 
     override func keyDown(with event: NSEvent) {

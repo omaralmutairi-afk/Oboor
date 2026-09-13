@@ -805,6 +805,8 @@ final class PreviewWindowController: NSWindowController, WKNavigationDelegate {
     private var wifiPasswordToggleButton: NSButton?
     private var wifiPasswordPlaintext: String?
     private var wifiPasswordRevealed = false
+    private var actionsStack: NSStackView?
+    private var appStoreBundleID: String?
 
     init(payload: ParsedPayload) {
         self.payload = payload
@@ -909,6 +911,7 @@ final class PreviewWindowController: NSWindowController, WKNavigationDelegate {
         actions.orientation = .horizontal
         actions.spacing = 8
         buildActionButtons(for: payload.kind).forEach { actions.addArrangedSubview($0) }
+        actionsStack = actions
         let actionsContainer = centeredHorizontally(actions)
         root.addArrangedSubview(actionsContainer)
         actionsContainer.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
@@ -1205,8 +1208,15 @@ final class PreviewWindowController: NSWindowController, WKNavigationDelegate {
     }
 
     @objc private func openInApp() {
-        if case .social(_, let scheme) = payload.kind, let scheme {
-            NSWorkspace.shared.open(scheme)
+        switch payload.kind {
+        case .social(_, let scheme):
+            if let scheme { NSWorkspace.shared.open(scheme) }
+        case .appStore:
+            if let bundleID = appStoreBundleID, let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+                NSWorkspace.shared.open(appURL)
+            }
+        default:
+            break
         }
     }
 
@@ -1299,14 +1309,24 @@ final class PreviewWindowController: NSWindowController, WKNavigationDelegate {
             let name = first["trackName"] as? String
             let seller = first["sellerName"] as? String
             let artwork = (first["artworkUrl512"] as? String) ?? (first["artworkUrl100"] as? String)
+            let bundleID = first["bundleId"] as? String
             DispatchQueue.main.async {
-                if let name { self?.titleLabel?.stringValue = name }
-                if let seller { self?.subtitleLabel?.stringValue = seller }
+                guard let self else { return }
+                if let name { self.titleLabel?.stringValue = name }
+                if let seller { self.subtitleLabel?.stringValue = seller }
                 if let artwork, let artworkURL = URL(string: artwork) {
                     URLSession.shared.dataTask(with: artworkURL) { imgData, _, _ in
                         guard let imgData, let image = NSImage(data: imgData) else { return }
-                        DispatchQueue.main.async { self?.iconView?.image = image }
+                        DispatchQueue.main.async { self.iconView?.image = image }
                     }.resume()
+                }
+                // Only revealed once we actually know the app is already
+                // installed — the lookup itself finishing tells us nothing
+                // about that, and the button must never appear (let alone
+                // do anything) for an app the user doesn't already have.
+                if let bundleID, NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) != nil {
+                    self.appStoreBundleID = bundleID
+                    self.actionsStack?.addArrangedSubview(self.button(L.t(.openInApp), action: #selector(self.openInApp)))
                 }
             }
         }.resume()

@@ -47,12 +47,17 @@ final class SettingsStore {
         static let hotKeyCode = "hotKeyCode"
         static let hotKeyModifiers = "hotKeyModifiers"
         static let language = "language"
+        static let pinKeyCode = "pinKeyCode"
+        static let pinKeyModifiers = "pinKeyModifiers"
+        static let privateBrowserID = "privateBrowserID"
     }
 
     private init() {
         d.register(defaults: [
             Key.hotKeyCode: Int(kVK_ANSI_O),
             Key.hotKeyModifiers: Int(cmdKey | shiftKey),
+            Key.pinKeyCode: Int(kVK_ANSI_P),
+            Key.pinKeyModifiers: 0,
         ])
     }
 
@@ -60,14 +65,29 @@ final class SettingsStore {
         NotificationCenter.default.post(name: .oboorSettingsChanged, object: nil)
     }
 
-    var hotKeyCode: UInt32 {
-        get { UInt32(d.integer(forKey: Key.hotKeyCode)) }
-        set { d.set(Int(newValue), forKey: Key.hotKeyCode); changed() }
+    var hotKeyCode: UInt32 { UInt32(d.integer(forKey: Key.hotKeyCode)) }
+    var hotKeyModifiers: UInt32 { UInt32(d.integer(forKey: Key.hotKeyModifiers)) }
+    var pinKeyCode: UInt32 { UInt32(d.integer(forKey: Key.pinKeyCode)) }
+    var pinKeyModifiers: UInt32 { UInt32(d.integer(forKey: Key.pinKeyModifiers)) }
+
+    // Code and modifiers are written together, then announced once — two
+    // separate notifications briefly registered a half-updated combo.
+    func setHotKey(code: UInt32, modifiers: UInt32) {
+        d.set(Int(code), forKey: Key.hotKeyCode)
+        d.set(Int(modifiers), forKey: Key.hotKeyModifiers)
+        changed()
     }
 
-    var hotKeyModifiers: UInt32 {
-        get { UInt32(d.integer(forKey: Key.hotKeyModifiers)) }
-        set { d.set(Int(newValue), forKey: Key.hotKeyModifiers); changed() }
+    func setPinKey(code: UInt32, modifiers: UInt32) {
+        d.set(Int(code), forKey: Key.pinKeyCode)
+        d.set(Int(modifiers), forKey: Key.pinKeyModifiers)
+        changed()
+    }
+
+    /// Bundle ID of the browser chosen for private opening; nil means automatic.
+    var privateBrowserID: String? {
+        get { d.string(forKey: Key.privateBrowserID) }
+        set { d.set(newValue, forKey: Key.privateBrowserID); changed() }
     }
 
     var language: AppLanguage {
@@ -90,10 +110,10 @@ final class SettingsStore {
 enum L {
     enum Key {
         case statusItemAccessibility, scanNowMenuItem, settingsMenuItem, quitMenuItem,
-             settingsWindowTitle, hotkeyRow, languageRow, launchAtLoginCheckbox, pressCombo,
+             settingsWindowTitle, hotkeyRow, languageRow, launchAtLoginCheckbox, pressCombo, pinKeyRow, privateBrowserRow, privateBrowserAutomatic,
              lensCaption, lensCaptionPinned, screenRecordingAlertTitle, screenRecordingAlertBody,
              screenRecordingAlertOpenSettings, screenRecordingAlertCancel,
-             previewTitle, openInBrowser, openPrivately, copyLink, copied,
+             previewTitle, openInBrowser, openPrivately, openPrivatelyIn, copyLink, copied,
              openInApp, openInAppStore, loadingAppStore,
              wifiCardTitle, wifiJoin, wifiCopyPassword, wifiOpenSettings, wifiHiddenBadge,
              contactCardTitle, contactAdd, contactAdded, contactAddFailed, contactNoName,
@@ -117,8 +137,11 @@ enum L {
         .languageRow: ("اللغة", "Language"),
         .launchAtLoginCheckbox: ("تشغيل عُبور تلقائيًا عند بدء تشغيل الماك", "Launch Oboor automatically at startup"),
         .pressCombo: ("اضغط الاختصار…", "Press a shortcut…"),
-        .lensCaption: ("مسافة للتثبيت · Esc للإلغاء", "Space to pin · Esc to cancel"),
-        .lensCaptionPinned: ("مثبّت — مسافة للمتابعة · Esc للإلغاء", "Pinned — Space: follow · Esc: cancel"),
+        .pinKeyRow: ("اختصار التثبيت أثناء المسح", "Pin shortcut while scanning"),
+        .privateBrowserRow: ("المتصفح للفتح الخفي", "Browser for private opening"),
+        .privateBrowserAutomatic: ("تلقائي", "Automatic"),
+        .lensCaption: ("%@ للتثبيت · Esc للإلغاء", "%@ to pin · Esc to cancel"),
+        .lensCaptionPinned: ("مثبّت — %@ للمتابعة · Esc للإلغاء", "Pinned — %@: follow · Esc: cancel"),
         .screenRecordingAlertTitle: ("عُبور يحتاج صلاحية تسجيل الشاشة", "Oboor needs Screen Recording access"),
         .screenRecordingAlertBody: ("عشان يقرأ رمز QR من شاشتك، فعّل الصلاحية من إعدادات النظام ثم أعد فتح عُبور.", "To read a QR code from your screen, grant the permission in System Settings, then relaunch Oboor."),
         .screenRecordingAlertOpenSettings: ("فتح الإعدادات", "Open Settings"),
@@ -126,6 +149,7 @@ enum L {
         .previewTitle: ("معاينة — عُبور", "Preview — Oboor"),
         .openInBrowser: ("فتح في المتصفح", "Open in Browser"),
         .openPrivately: ("فتح خفي", "Open Privately"),
+        .openPrivatelyIn: ("فتح خفي في %@", "Open Privately in %@"),
         .copyLink: ("نسخ الرابط", "Copy Link"),
         .copied: ("تم النسخ ✓", "Copied ✓"),
         .openInApp: ("فتح في التطبيق", "Open in App"),
@@ -243,11 +267,17 @@ private func hotKeyEventHandler(_ nextHandler: EventHandlerCallRef?, _ event: Ev
     return noErr
 }
 
+/// One place for the IDs, since `hotKeyHandlers` is keyed by them and a
+/// duplicate would silently replace another hotkey's handler.
+enum HotKeyID: UInt32 {
+    case scan = 1, lensEscape, lensPin
+}
+
 final class GlobalHotKey {
     private let id: UInt32
     private var hotKeyRef: EventHotKeyRef?
 
-    init(id: UInt32) { self.id = id }
+    init(_ id: HotKeyID) { self.id = id.rawValue }
 
     func register(keyCode: UInt32, modifiers: UInt32, toggle: @escaping () -> Void) {
         if !hotKeyEventHandlerInstalled {
@@ -256,9 +286,14 @@ final class GlobalHotKey {
             hotKeyEventHandlerInstalled = true
         }
         unregister()
-        hotKeyHandlers[id] = toggle
         let hotKeyID = EventHotKeyID(signature: OSType(0x4F42524B), id: id) // 'OBRK'
-        RegisterEventHotKey(keyCode, modifiers, hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
+        let status = RegisterEventHotKey(keyCode, modifiers, hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
+        guard status == noErr else {
+            print("[Oboor] RegisterEventHotKey(key: \(keyCode), mods: \(modifiers)) failed: \(status)")
+            fflush(stdout)
+            return
+        }
+        hotKeyHandlers[id] = toggle
     }
 
     func unregister() {
@@ -273,10 +308,13 @@ final class GlobalHotKey {
 /// A click-to-record shortcut field, same interaction as System Settings'
 /// own shortcut recorders — lifted from Naqla's KeyRecorderView.
 final class KeyRecorderView: NSView {
-    var onChange: ((UInt32, UInt32) -> Void)?
+    /// Returns false to reject the combo (e.g. it collides with the other
+    /// shortcut); the recorder then beeps and keeps recording.
+    var onChange: ((UInt32, UInt32) -> Bool)?
 
     private var keyCode: UInt32
     private var modifiers: UInt32
+    private let requiresModifier: Bool
     private var isRecording = false { didSet { refresh() } }
     private let label = NSTextField(labelWithString: "")
 
@@ -295,9 +333,10 @@ final class KeyRecorderView: NSView {
         ]
     }()
 
-    init(keyCode: UInt32, modifiers: UInt32) {
+    init(keyCode: UInt32, modifiers: UInt32, requiresModifier: Bool = true) {
         self.keyCode = keyCode
         self.modifiers = modifiers
+        self.requiresModifier = requiresModifier
         super.init(frame: .zero)
         wantsLayer = true
         layer?.cornerRadius = 6
@@ -330,12 +369,16 @@ final class KeyRecorderView: NSView {
 
     override func keyDown(with event: NSEvent) {
         guard isRecording else { return }
+        if event.keyCode == UInt16(kVK_Escape) { isRecording = false; return }
         let mods = event.modifierFlags.intersection([.command, .option, .control, .shift])
-        guard !mods.isEmpty else { NSSound.beep(); return }
-        keyCode = UInt32(event.keyCode)
-        modifiers = Self.carbonModifiers(from: mods)
+        let code = UInt32(event.keyCode)
+        // Keys missing from keyNames would display as "?".
+        guard Self.keyNames[code] != nil, !(requiresModifier && mods.isEmpty) else { NSSound.beep(); return }
+        let newModifiers = Self.carbonModifiers(from: mods)
+        guard onChange?(code, newModifiers) ?? true else { NSSound.beep(); return }
+        keyCode = code
+        modifiers = newModifiers
         isRecording = false
-        onChange?(keyCode, modifiers)
     }
 
     @discardableResult
@@ -360,7 +403,7 @@ final class KeyRecorderView: NSView {
         return result
     }
 
-    private static func symbolString(keyCode: UInt32, modifiers: UInt32) -> String {
+    static func symbolString(keyCode: UInt32, modifiers: UInt32) -> String {
         var s = ""
         if modifiers & UInt32(controlKey) != 0 { s += "⌃" }
         if modifiers & UInt32(optionKey) != 0 { s += "⌥" }
@@ -381,7 +424,7 @@ enum PayloadKind {
     case contact(name: String?, phone: String?, email: String?, org: String?)
     case email(String)
     case phone(String)
-    case sms(URL)
+    case sms(number: String, body: String?)
     case geo(coordinates: String, mapsURL: URL)
     case calendarEvent(title: String?, location: String?, start: Date?, end: Date?)
     case text(String)
@@ -404,10 +447,11 @@ enum PayloadClassifier {
         if upper.hasPrefix("MAILTO:") { return ParsedPayload(raw: raw, kind: .email(String(trimmed.dropFirst(7)))) }
         if upper.hasPrefix("TEL:") { return ParsedPayload(raw: raw, kind: .phone(String(trimmed.dropFirst(4)))) }
         if upper.hasPrefix("SMSTO:") || upper.hasPrefix("SMS:") {
-            if let url = URL(string: trimmed) { return ParsedPayload(raw: raw, kind: .sms(url)) }
+            return ParsedPayload(raw: raw, kind: classifySMS(trimmed))
         }
         if upper.hasPrefix("GEO:") {
-            let coords = String(trimmed.dropFirst(4))
+            // geo:lat,lon may carry ;u=… or ?q=… suffixes that don't belong in ll=.
+            let coords = String(trimmed.dropFirst(4).prefix { $0 != "?" && $0 != ";" }.filter { !$0.isWhitespace })
             if let mapsURL = URL(string: "http://maps.apple.com/?ll=\(coords)") {
                 return ParsedPayload(raw: raw, kind: .geo(coordinates: coords, mapsURL: mapsURL))
             }
@@ -427,18 +471,59 @@ enum PayloadClassifier {
         return ParsedPayload(raw: raw, kind: .text(trimmed))
     }
 
+    /// Splits WIFI:/MECARD: content into KEY/value fields on unescaped `;`,
+    /// honoring `\;` `\:` `\,` `\\` `\"` — Wi-Fi passwords routinely contain
+    /// `;` or `:`, and a plain split cut them short.
+    static func escapedFields(_ content: Substring) -> [(key: String, value: String)] {
+        var segments: [String] = []
+        var current = ""
+        var escaping = false
+        for ch in content {
+            if escaping { current.append("\\"); current.append(ch); escaping = false }
+            else if ch == "\\" { escaping = true }
+            else if ch == ";" { segments.append(current); current = "" }
+            else { current.append(ch) }
+        }
+        if !current.isEmpty { segments.append(current) }
+
+        return segments.compactMap { segment in
+            guard let colon = segment.firstIndex(of: ":") else { return nil }
+            var rawValue = String(segment[segment.index(after: colon)...])
+            if rawValue.count >= 2, rawValue.hasPrefix("\""), rawValue.hasSuffix("\""), !rawValue.hasSuffix("\\\"") {
+                rawValue = String(rawValue.dropFirst().dropLast())
+            }
+            var value = ""
+            var escaping = false
+            for ch in rawValue {
+                if escaping { value.append(ch); escaping = false }
+                else if ch == "\\" { escaping = true }
+                else { value.append(ch) }
+            }
+            return (segment[..<colon].uppercased(), value)
+        }
+    }
+
+    /// vCard/iCalendar TEXT escaping: `\,` `\;` `\\` and `\n`.
+    static func unescapeText(_ s: String) -> String {
+        var out = ""
+        var escaping = false
+        for ch in s {
+            if escaping { out.append(ch == "n" || ch == "N" ? "\n" : ch); escaping = false }
+            else if ch == "\\" { escaping = true }
+            else { out.append(ch) }
+        }
+        return out
+    }
+
     private static func classifyWiFi(_ raw: String) -> PayloadKind {
-        let content = raw.dropFirst("WIFI:".count)
         var ssid = ""
         var password: String?
         var hidden = false
-        for field in content.split(separator: ";") {
-            let parts = field.split(separator: ":", maxSplits: 1).map(String.init)
-            guard parts.count == 2 else { continue }
-            switch parts[0].uppercased() {
-            case "S": ssid = parts[1]
-            case "P": password = parts[1].isEmpty ? nil : parts[1]
-            case "H": hidden = parts[1].lowercased() == "true"
+        for field in escapedFields(raw.dropFirst("WIFI:".count)) {
+            switch field.key {
+            case "S": ssid = field.value
+            case "P": password = field.value.isEmpty ? nil : field.value
+            case "H": hidden = field.value.lowercased() == "true"
             default: break
             }
         }
@@ -451,8 +536,17 @@ enum PayloadClassifier {
             let parts = line.split(separator: ":", maxSplits: 1).map(String.init)
             guard parts.count == 2 else { continue }
             let key = parts[0].uppercased()
-            let value = parts[1].trimmingCharacters(in: .whitespaces)
+            let value = unescapeText(parts[1].trimmingCharacters(in: .whitespaces))
             if key.hasPrefix("FN") { name = value }
+            else if key == "N" || key.hasPrefix("N;") {
+                // N is "Last;First;…" — only a fallback for a card without FN.
+                guard name == nil else { continue }
+                let components = parts[1].split(separator: ";", omittingEmptySubsequences: false)
+                    .map { unescapeText($0.trimmingCharacters(in: .whitespaces)) }
+                let joined = [components.count > 1 ? components[1] : "", components.first ?? ""]
+                    .filter { !$0.isEmpty }.joined(separator: " ")
+                if !joined.isEmpty { name = joined }
+            }
             else if key.hasPrefix("TEL"), phone == nil { phone = value }
             else if key.hasPrefix("EMAIL"), email == nil { email = value }
             else if key.hasPrefix("ORG") { org = value }
@@ -461,47 +555,111 @@ enum PayloadClassifier {
     }
 
     private static func classifyMeCard(_ raw: String) -> PayloadKind {
-        let content = raw.dropFirst("MECARD:".count)
         var name: String?, phone: String?, email: String?, org: String?
-        for field in content.split(separator: ";") {
-            let parts = field.split(separator: ":", maxSplits: 1).map(String.init)
-            guard parts.count == 2 else { continue }
-            switch parts[0].uppercased() {
-            case "N": name = parts[1].replacingOccurrences(of: ",", with: " ")
-            case "TEL": phone = parts[1]
-            case "EMAIL": email = parts[1]
-            case "ORG": org = parts[1]
+        for field in escapedFields(raw.dropFirst("MECARD:".count)) {
+            switch field.key {
+            case "N":
+                // MECARD's N is "Last,First"; ContactSaver expects "First Last".
+                let parts = field.value.split(separator: ",", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+                name = parts.count == 2 ? "\(parts[1]) \(parts[0])" : field.value
+            case "TEL": if phone == nil { phone = field.value }
+            case "EMAIL": if email == nil { email = field.value }
+            case "ORG": org = field.value
             default: break
             }
         }
         return .contact(name: name, phone: phone, email: email, org: org)
     }
 
+    /// SMSTO:<number>:<body> (what most QR generators emit) or
+    /// sms:<number>?body=<body>. Messages on macOS doesn't handle SMSTO:
+    /// URLs at all, so the parts are kept and an sms: URL is rebuilt later.
+    private static func classifySMS(_ raw: String) -> PayloadKind {
+        let content = String(raw.drop { $0 != ":" }.dropFirst())
+        if raw.uppercased().hasPrefix("SMSTO:") {
+            let parts = content.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+            let body = parts.count > 1 && !parts[1].isEmpty ? parts[1] : nil
+            return .sms(number: parts[0], body: body)
+        }
+        let parts = content.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+        var body: String?
+        if parts.count > 1 {
+            for pair in parts[1].split(separator: "&") {
+                let kv = pair.split(separator: "=", maxSplits: 1).map(String.init)
+                if kv.count == 2, kv[0].lowercased() == "body" {
+                    body = kv[1].removingPercentEncoding ?? kv[1]
+                }
+            }
+        }
+        return .sms(number: parts[0], body: body)
+    }
+
     private static func classifyVEvent(_ raw: String) -> PayloadKind {
         var title: String?, location: String?, start: Date?, end: Date?
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd'T'HHmmss"
-        formatter.timeZone = TimeZone(identifier: "UTC")
         for line in raw.components(separatedBy: .newlines) {
             let parts = line.split(separator: ":", maxSplits: 1).map(String.init)
             guard parts.count == 2 else { continue }
             let key = parts[0].uppercased()
-            let value = parts[1].trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "Z", with: "")
-            if key.hasPrefix("SUMMARY") { title = parts[1].trimmingCharacters(in: .whitespaces) }
-            else if key.hasPrefix("LOCATION") { location = parts[1].trimmingCharacters(in: .whitespaces) }
-            else if key.hasPrefix("DTSTART") { start = formatter.date(from: value) }
-            else if key.hasPrefix("DTEND") { end = formatter.date(from: value) }
+            let value = parts[1].trimmingCharacters(in: .whitespaces)
+            if key.hasPrefix("SUMMARY") { title = unescapeText(value) }
+            else if key.hasPrefix("LOCATION") { location = unescapeText(value) }
+            else if key.hasPrefix("DTSTART") { start = parseICalDate(value, params: parts[0]) }
+            else if key.hasPrefix("DTEND") { end = parseICalDate(value, params: parts[0]) }
         }
         return .calendarEvent(title: title, location: location, start: start, end: end)
     }
 
+    /// A trailing Z means UTC, `;TZID=` names the zone, and anything else is
+    /// floating local time — reading every value as UTC shifted local events
+    /// by the user's UTC offset. POSIX locale + Gregorian, because a device
+    /// set to an Islamic-calendar region otherwise misreads "2026…" years.
+    static func parseICalDate(_ value: String, params: String) -> Date? {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        var text = value
+        if text.uppercased().hasSuffix("Z") {
+            text.removeLast()
+            formatter.timeZone = TimeZone(identifier: "UTC")
+        } else if let range = params.range(of: "TZID=", options: .caseInsensitive) {
+            let zone = params[range.upperBound...].prefix { $0 != ";" }.replacingOccurrences(of: "\"", with: "")
+            formatter.timeZone = TimeZone(identifier: zone) ?? .current
+        } else {
+            formatter.timeZone = .current
+        }
+        switch text.count {
+        case 8: formatter.dateFormat = "yyyyMMdd"
+        case 13: formatter.dateFormat = "yyyyMMdd'T'HHmm"
+        default: formatter.dateFormat = "yyyyMMdd'T'HHmmss"
+        }
+        return formatter.date(from: text)
+    }
+
+    /// First path segments that are features, not usernames — without this,
+    /// "Open in App" on a post link (instagram.com/p/…, x.com/i/…) opened a
+    /// nonexistent profile named "p" or "i".
+    private static let nonProfilePaths: Set<String> = [
+        "p", "reel", "reels", "tv", "stories", "explore", "accounts", "direct",
+        "i", "intent", "home", "search", "hashtag", "settings", "messages", "notifications",
+        "share", "sharer", "sharer.php", "groups", "events", "watch", "pages", "marketplace",
+        "story.php", "permalink.php", "photo", "photo.php", "login",
+        "joinchat", "c", "s", "addstickers", "proxy",
+    ]
+
     private static func socialAppScheme(for url: URL, host: String) -> URL? {
-        let username = url.path.split(separator: "/").first.map(String.init)
+        let parts = url.path.split(separator: "/").map(String.init)
+        let username = parts.count == 1 && !parts[0].hasPrefix("+") && !nonProfilePaths.contains(parts[0].lowercased())
+            ? parts[0] : nil
         if host.contains("instagram.com"), let u = username {
             return URL(string: "instagram://user?username=\(u)")
         }
-        if host == "twitter.com" || host == "x.com", let u = username {
+        if host == "twitter.com" || host == "x.com" || host.hasSuffix(".twitter.com") || host.hasSuffix(".x.com"), let u = username {
             return URL(string: "twitter://user?screen_name=\(u)")
+        }
+        if host.contains("facebook.com"), parts == ["profile.php"],
+           let id = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "id" })?.value,
+           !id.isEmpty, id.allSatisfy(\.isNumber) {
+            return URL(string: "fb://profile/\(id)")
         }
         // WhatsApp's Mac app claims no associated domains, so universal
         // links can't reach it — its own whatsapp:// scheme is the only way
@@ -550,21 +708,32 @@ enum QRDetector {
     /// Cocoa screen coordinates) and looks for a QR payload. Deliberately
     /// excludes the lens window itself from the capture so the frame's own
     /// chrome never gets mistaken for content.
-    static func scan(rect: NSRect, excludingWindowID windowID: CGWindowID) async -> String? {
-        guard let mainScreen = NSScreen.screens.first else { return nil }
-        let maxY = mainScreen.frame.maxY
-        let cgRect = CGRect(x: rect.origin.x, y: maxY - rect.origin.y - rect.height, width: rect.width, height: rect.height)
+    /// `primaryScreenMaxY` and `scale` come from the main thread, since this
+    /// runs detached and NSScreen/NSWindow aren't safe to touch from here.
+    static func scan(rect: NSRect, primaryScreenMaxY: CGFloat, scale: CGFloat, excludingWindowID windowID: CGWindowID) async -> String? {
+        // Cocoa's global space is bottom-left based on the primary screen;
+        // ScreenCaptureKit's is top-left based on that same screen.
+        let globalRect = CGRect(x: rect.origin.x, y: primaryScreenMaxY - rect.origin.y - rect.height, width: rect.width, height: rect.height)
 
         guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) else { return nil }
-        guard let display = content.displays.first(where: { CGRect(x: 0, y: 0, width: $0.width, height: $0.height).intersects(cgRect) }) ?? content.displays.first else {
-            return nil
-        }
+        let center = CGPoint(x: globalRect.midX, y: globalRect.midY)
+        guard let display = content.displays.first(where: { $0.frame.contains(center) })
+                ?? content.displays.first(where: { $0.frame.intersects(globalRect) }) else { return nil }
+        // sourceRect is relative to the chosen display (not global, which
+        // captured the wrong area on a secondary monitor) and clipped to it,
+        // since the lens can hang off a screen edge.
+        let visible = globalRect.intersection(display.frame)
+        guard !visible.isNull, visible.width > 1, visible.height > 1 else { return nil }
+        let sourceRect = visible.offsetBy(dx: -display.frame.minX, dy: -display.frame.minY)
+
         let excludedWindows = content.windows.filter { $0.windowID == windowID }
         let filter = SCContentFilter(display: display, excludingWindows: excludedWindows)
         let config = SCStreamConfiguration()
-        config.width = max(1, Int(cgRect.width))
-        config.height = max(1, Int(cgRect.height))
-        config.sourceRect = cgRect
+        // Pixels, not points: a 1x capture on Retina halved the detail Vision
+        // gets, which is what small embedded codes need most.
+        config.width = max(1, Int(sourceRect.width * scale))
+        config.height = max(1, Int(sourceRect.height * scale))
+        config.sourceRect = sourceRect
         config.showsCursor = false
 
         guard let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) else {
@@ -581,10 +750,6 @@ enum QRDetector {
 }
 
 // MARK: - Lens overlay
-
-final class LensPanel: NSPanel {
-    override var canBecomeKey: Bool { true }
-}
 
 /// Draws the magnifier-style scan frame: four corner brackets over an
 /// otherwise fully transparent view, so the capture underneath is never
@@ -635,17 +800,17 @@ final class LensFrameView: NSView {
 final class LensWindowController: NSWindowController {
     private var scanTimer: Timer?
     private var followTimer: Timer?
-    private let escapeHotKey = GlobalHotKey(id: 2)
-    private let pinHotKey = GlobalHotKey(id: 3)
+    private let escapeHotKey = GlobalHotKey(.lensEscape)
+    private let pinHotKey = GlobalHotKey(.lensPin)
     private var frameView: LensFrameView!
     private var caption: NSTextField!
     private var isPinned = false {
         didSet {
             frameView.isPinned = isPinned
-            caption.stringValue = L.t(isPinned ? .lensCaptionPinned : .lensCaption)
+            caption.stringValue = Self.captionText(pinned: isPinned)
         }
     }
-    private var isCancelled = false
+    private var isFinished = false
     var onFound: ((String) -> Void)?
     var onCancelled: (() -> Void)?
 
@@ -654,7 +819,7 @@ final class LensWindowController: NSWindowController {
 
     init() {
         let size = NSSize(width: Self.frameSize.width, height: Self.frameSize.height + Self.captionHeight)
-        let panel = LensPanel(
+        let panel = NSPanel(
             contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered, defer: false
@@ -697,7 +862,7 @@ final class LensWindowController: NSWindowController {
         captionBackground.layer?.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
         content.addSubview(captionBackground)
 
-        let caption = NSTextField(labelWithString: L.t(.lensCaption))
+        let caption = NSTextField(labelWithString: Self.captionText(pinned: false))
         caption.font = .systemFont(ofSize: 11, weight: .medium)
         caption.textColor = .white
         caption.alignment = .center
@@ -717,20 +882,29 @@ final class LensWindowController: NSWindowController {
         escapeHotKey.register(keyCode: UInt32(kVK_Escape), modifiers: 0) { [weak self] in
             DispatchQueue.main.async { self?.cancel() }
         }
-        pinHotKey.register(keyCode: UInt32(kVK_Space), modifiers: 0) { [weak self] in
+        let store = SettingsStore.shared
+        pinHotKey.register(keyCode: store.pinKeyCode, modifiers: store.pinKeyModifiers) { [weak self] in
             DispatchQueue.main.async { self?.isPinned.toggle() }
         }
 
         // Pinning lets the cursor move away (e.g. to open another app's
         // full-size image viewer) without taking the lens with it.
-        followTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+        var lastMouse: NSPoint?
+        let follow = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
             guard let self, !self.isPinned else { return }
-            self.reposition(to: NSEvent.mouseLocation)
+            let mouse = NSEvent.mouseLocation
+            guard mouse != lastMouse else { return }
+            lastMouse = mouse
+            self.reposition(to: mouse)
         }
+        // .common, not the default mode, so tracking doesn't freeze while
+        // Oboor's own status menu runs its event-tracking loop.
+        RunLoop.main.add(follow, forMode: .common)
+        followTimer = follow
 
         let windowID = CGWindowID(panel.windowNumber)
         var scanInFlight = false
-        scanTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+        let scan = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in
             guard let self, let window = self.window, !scanInFlight else { return }
             // Re-assert front placement on every tick, not just at show():
             // the user often needs to open another app's own full-size
@@ -740,22 +914,32 @@ final class LensWindowController: NSWindowController {
             window.orderFrontRegardless()
             scanInFlight = true
             let frame = window.frame
+            let scale = window.backingScaleFactor
+            let primaryScreenMaxY = NSScreen.screens.first?.frame.maxY ?? 0
             // Detached, not @MainActor: the capture + Vision pass is heavy
             // enough that running it on the main thread stalled the run loop
             // for the ~0.2s tick, which showed up as jitter/ghosting while
             // the lens was moving. Only the tiny bit that touches
             // `self`/the window hops back to the main actor.
             Task.detached(priority: .userInitiated) {
-                let payload = await QRDetector.scan(rect: frame, excludingWindowID: windowID)
+                let payload = await QRDetector.scan(rect: frame, primaryScreenMaxY: primaryScreenMaxY, scale: scale, excludingWindowID: windowID)
                 await MainActor.run {
                     scanInFlight = false
                     // The user may have hit Escape while this scan was in
                     // flight — don't resurrect a preview for a lens they
                     // already dismissed.
-                    if let payload, !self.isCancelled { self.found(payload) }
+                    if let payload, !self.isFinished { self.found(payload) }
                 }
             }
         }
+        RunLoop.main.add(scan, forMode: .common)
+        scanTimer = scan
+    }
+
+    private static func captionText(pinned: Bool) -> String {
+        let store = SettingsStore.shared
+        let key = KeyRecorderView.symbolString(keyCode: store.pinKeyCode, modifiers: store.pinKeyModifiers)
+        return String(format: L.t(pinned ? .lensCaptionPinned : .lensCaption), key)
     }
 
     private func reposition(to mouse: NSPoint) {
@@ -769,6 +953,7 @@ final class LensWindowController: NSWindowController {
         if let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }) {
             if origin.x < screen.frame.minX { origin.x = mouse.x + gap }
             if origin.y + size.height > screen.frame.maxY { origin.y = mouse.y - size.height - gap }
+            origin.y = max(origin.y, screen.frame.minY)
         }
         panel.setFrameOrigin(origin)
     }
@@ -783,13 +968,18 @@ final class LensWindowController: NSWindowController {
         window?.orderOut(nil)
     }
 
+    // Both paths are one-shot: Esc is delivered asynchronously and can land
+    // right after a scan already finished (or vice versa).
     private func found(_ payload: String) {
+        guard !isFinished else { return }
+        isFinished = true
         tearDown()
         onFound?(payload)
     }
 
     func cancel() {
-        isCancelled = true
+        guard !isFinished else { return }
+        isFinished = true
         tearDown()
         onCancelled?()
     }
@@ -828,7 +1018,9 @@ enum ContactSaver {
 enum CalendarSaver {
     static func save(title: String?, location: String?, start: Date?, end: Date?, completion: @escaping (Bool) -> Void) {
         let store = EKEventStore()
-        store.requestFullAccessToEvents { granted, _ in
+        // Write-only: Oboor only ever adds an event and never needs to read
+        // the user's calendar.
+        store.requestWriteOnlyAccessToEvents { granted, _ in
             guard granted else { DispatchQueue.main.async { completion(false) }; return }
             let event = EKEvent(eventStore: store)
             event.title = title ?? L.t(.calendarNoTitle)
@@ -893,13 +1085,57 @@ func addCentered(_ view: NSView, to stack: NSStackView, minHeight: CGFloat) {
     ])
 }
 
+// MARK: - Private browsing
+
+/// Browsers with a command-line flag for a private window. Safari has none
+/// (short of UI scripting), so it can't be offered.
+enum PrivateBrowser {
+    typealias Choice = (bundleID: String, flag: String, app: URL)
+
+    private static let known: [(bundleID: String, flag: String)] = [
+        ("com.google.Chrome", "--incognito"), ("com.brave.Browser", "--incognito"),
+        ("com.microsoft.edgemac", "--inprivate"), ("com.vivaldi.Vivaldi", "--incognito"),
+    ]
+
+    static func installed() -> [Choice] {
+        known.compactMap { browser in
+            NSWorkspace.shared.urlForApplication(withBundleIdentifier: browser.bundleID)
+                .map { (bundleID: browser.bundleID, flag: browser.flag, app: $0) }
+        }
+    }
+
+    static func displayName(of app: URL) -> String {
+        app.deletingPathExtension().lastPathComponent
+    }
+
+    private static func defaultBrowserID() -> String? {
+        NSWorkspace.shared.urlForApplication(toOpen: URL(string: "https://example.com")!)
+            .flatMap { Bundle(url: $0)?.bundleIdentifier }
+    }
+
+    /// The default browser when it supports private windows, otherwise the
+    /// first installed one that does.
+    static func automatic() -> Choice? {
+        let available = installed()
+        let defaultID = defaultBrowserID()
+        return available.first { $0.bundleID == defaultID } ?? available.first
+    }
+
+    /// The browser picked in Settings while it's still installed, otherwise automatic.
+    static func resolve() -> (choice: Choice, isDefault: Bool)? {
+        let picked = SettingsStore.shared.privateBrowserID.flatMap { id in installed().first { $0.bundleID == id } }
+        guard let choice = picked ?? automatic() else { return nil }
+        return (choice, choice.bundleID == defaultBrowserID())
+    }
+}
+
 // MARK: - Preview window
 
 final class PreviewPanel: NSPanel {
     override var canBecomeKey: Bool { true }
 }
 
-final class PreviewWindowController: NSWindowController, WKNavigationDelegate {
+final class PreviewWindowController: NSWindowController, WKNavigationDelegate, NSWindowDelegate {
     private let payload: ParsedPayload
     private var webView: WKWebView?
     private var statusLabel: NSTextField?
@@ -926,15 +1162,26 @@ final class PreviewWindowController: NSWindowController, WKNavigationDelegate {
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         super.init(window: panel)
+        panel.delegate = self
         buildUI()
         positionNearMouse()
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
+    /// A closed preview stays alive until the next scan replaces it, and its
+    /// WKWebView kept playing a page's audio/video after the window closed.
+    func windowWillClose(_ notification: Notification) {
+        webView?.stopLoading()
+        webView?.removeFromSuperview()
+        webView = nil
+    }
+
     private func positionNearMouse() {
-        guard let window, let screen = NSScreen.main else { return }
         let mouse = NSEvent.mouseLocation
+        // The screen under the cursor, not NSScreen.main (the screen with the
+        // key window), which put the preview on the wrong monitor.
+        guard let window, let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }) ?? NSScreen.main else { return }
         var origin = NSPoint(x: mouse.x - window.frame.width / 2, y: mouse.y - window.frame.height / 2)
         origin.x = min(max(origin.x, screen.visibleFrame.minX + 8), screen.visibleFrame.maxX - window.frame.width - 8)
         origin.y = min(max(origin.y, screen.visibleFrame.minY + 8), screen.visibleFrame.maxY - window.frame.height - 8)
@@ -1061,7 +1308,7 @@ final class PreviewWindowController: NSWindowController, WKNavigationDelegate {
         case .contact(_, let phone, let email, _): return [phone, email].compactMap { $0 }.joined(separator: " · ")
         case .email: return L.t(.emailCardTitle)
         case .phone: return L.t(.phoneCardTitle)
-        case .sms(let url): return url.absoluteString
+        case .sms(let number, _): return number
         case .geo(let coords, _): return coords
         case .calendarEvent(_, let location, _, _): return location ?? ""
         case .text(let value): return String(value.prefix(80))
@@ -1120,8 +1367,9 @@ final class PreviewWindowController: NSWindowController, WKNavigationDelegate {
         case .phone(let number):
             addCentered(detailStack([(L.t(.fieldPhone), number)]), to: root, minHeight: Self.bodyMinHeight)
 
-        case .sms(let url):
-            addCentered(detailStack([(L.t(.fieldMessage), url.absoluteString)]), to: root, minHeight: Self.bodyMinHeight)
+        case .sms(let number, let body):
+            let rows: [(String, String?)] = [(L.t(.fieldPhone), number), (L.t(.fieldMessage), body)]
+            addCentered(detailStack(rows.compactMap { label, value in value.map { (label, $0) } }), to: root, minHeight: Self.bodyMinHeight)
 
         case .geo(let coords, _):
             addCentered(detailStack([(L.t(.fieldCoordinates), coords)]), to: root, minHeight: Self.bodyMinHeight)
@@ -1138,14 +1386,15 @@ final class PreviewWindowController: NSWindowController, WKNavigationDelegate {
             ].compactMap { label, value in value.map { (label, $0) } }), to: root, minHeight: Self.bodyMinHeight)
 
         case .text(let value):
-            let scroll = NSScrollView()
-            scroll.hasVerticalScroller = true
+            // scrollableTextView wires up the text container to track the
+            // scroll view's width, which a bare zero-frame NSTextView doesn't.
+            let scroll = NSTextView.scrollableTextView()
             scroll.borderType = .noBorder
-            let textView = NSTextView()
-            textView.string = value
-            textView.isEditable = false
-            textView.font = .systemFont(ofSize: 13)
-            scroll.documentView = textView
+            if let textView = scroll.documentView as? NSTextView {
+                textView.string = value
+                textView.isEditable = false
+                textView.font = .systemFont(ofSize: 13)
+            }
             addFullWidthBody(scroll, to: root)
         }
     }
@@ -1201,7 +1450,12 @@ final class PreviewWindowController: NSWindowController, WKNavigationDelegate {
         switch kind {
         case .url, .social:
             var buttons = [button(L.t(.openInBrowser), action: #selector(openInBrowser))]
-            if canOpenPrivately() { buttons.append(button(L.t(.openPrivately), action: #selector(openPrivately))) }
+            if let browser = PrivateBrowser.resolve() {
+                let title = browser.isDefault
+                    ? L.t(.openPrivately)
+                    : String(format: L.t(.openPrivatelyIn), PrivateBrowser.displayName(of: browser.choice.app))
+                buttons.append(button(title, action: #selector(openPrivately)))
+            }
             buttons.append(button(L.t(.copyLink), action: #selector(copyLink)))
             if case .social(_, let scheme) = kind, let scheme, NSWorkspace.shared.urlForApplication(toOpen: scheme) != nil {
                 buttons.append(button(L.t(.openInApp), action: #selector(openInApp)))
@@ -1248,26 +1502,29 @@ final class PreviewWindowController: NSWindowController, WKNavigationDelegate {
         statusLabel?.stringValue = text
     }
 
-    private func canOpenPrivately() -> Bool {
-        guard let defaultBrowser = NSWorkspace.shared.urlForApplication(toOpen: URL(string: "https://example.com")!) else { return false }
-        let name = defaultBrowser.deletingPathExtension().lastPathComponent.lowercased()
-        return ["google chrome", "microsoft edge", "brave browser", "vivaldi"].contains(name)
-    }
-
     @objc private func openInBrowser() {
-        guard let url = destinationURL() else { showStatus(L.t(.genericOpenFailed)); return }
-        NSWorkspace.shared.open(url)
+        // open() returns false when nothing handles the scheme (e.g. tel:
+        // with no calling app) — that used to fail silently and still log a visit.
+        guard let url = destinationURL(), NSWorkspace.shared.open(url) else { showStatus(L.t(.genericOpenFailed)); return }
         recordVisit(url: url)
     }
 
     @objc private func openPrivately() {
-        guard let url = destinationURL(), let defaultBrowser = NSWorkspace.shared.urlForApplication(toOpen: url) else {
+        guard let url = destinationURL(), let browser = PrivateBrowser.resolve()?.choice else {
             showStatus(L.t(.genericOpenFailed)); return
         }
-        let config = NSWorkspace.OpenConfiguration()
-        config.arguments = ["--incognito", "--inprivate"]
-        NSWorkspace.shared.open([url], withApplicationAt: defaultBrowser, configuration: config, completionHandler: nil)
-        recordVisit(url: url)
+        // OpenConfiguration.arguments only reach a browser that isn't running
+        // yet, so with the browser already open the link landed in a normal
+        // window. `open -na … --args` hands the flag to the running instance.
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = ["-na", browser.app.path, "--args", browser.flag, url.absoluteString]
+        do {
+            try process.run()
+            recordVisit(url: url)
+        } catch {
+            showStatus(L.t(.genericOpenFailed))
+        }
     }
 
     /// History only ever tracks actual link visits (url/appStore/social),
@@ -1276,7 +1533,10 @@ final class PreviewWindowController: NSWindowController, WKNavigationDelegate {
     private func recordVisit(url: URL) {
         switch payload.kind {
         case .url, .appStore, .social:
-            HistoryStore.shared.record(url: url.absoluteString, title: titleLabel?.stringValue ?? url.host ?? url.absoluteString)
+            // An App Store title still reads "Loading…" if the lookup hasn't returned.
+            let title = titleLabel?.stringValue ?? ""
+            let usable = !title.isEmpty && title != L.t(.loadingAppStore)
+            HistoryStore.shared.record(url: url.absoluteString, title: usable ? title : (url.host ?? url.absoluteString))
         default:
             break
         }
@@ -1364,7 +1624,7 @@ final class PreviewWindowController: NSWindowController, WKNavigationDelegate {
         case .url(let url), .appStore(let url), .social(let url, _): return url
         case .email(let address): return URL(string: "mailto:\(address)")
         case .phone(let number): return URL(string: "tel:\(number.filter { !$0.isWhitespace })")
-        case .sms(let url): return url
+        case .sms(let number, _): return URL(string: "sms:\(number.filter { !$0.isWhitespace })")
         case .geo(_, let mapsURL): return mapsURL
         default: return nil
         }
@@ -1385,14 +1645,23 @@ final class PreviewWindowController: NSWindowController, WKNavigationDelegate {
 
     private func fetchAppStoreInfo() {
         guard case .appStore(let url) = payload.kind else { return }
-        guard let idRange = url.absoluteString.range(of: "id[0-9]+", options: .regularExpression) else { return }
-        let id = String(url.absoluteString[idRange].dropFirst(2))
-        guard let lookupURL = URL(string: "https://itunes.apple.com/lookup?id=\(id)") else { return }
+        // Any failure below falls back to the host, instead of leaving the
+        // title stuck on "Loading…" forever.
+        let giveUp = { [weak self] in
+            DispatchQueue.main.async { self?.titleLabel?.stringValue = url.host ?? url.absoluteString }
+        }
+        guard let idRange = url.path.range(of: "/id[0-9]+", options: .regularExpression) else { giveUp(); return }
+        let id = String(url.path[idRange].dropFirst(3))
+        // Without a country the lookup only searches the US store, so apps
+        // missing there (common for Saudi-only apps) never resolved.
+        let pathCountry = url.path.split(separator: "/").first.map(String.init).flatMap { $0.count == 2 && $0.allSatisfy(\.isLetter) ? $0 : nil }
+        let country = (pathCountry ?? Locale.current.region?.identifier ?? "us").lowercased()
+        guard let lookupURL = URL(string: "https://itunes.apple.com/lookup?id=\(id)&country=\(country)") else { giveUp(); return }
         URLSession.shared.dataTask(with: lookupURL) { [weak self] data, _, _ in
             guard let data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let results = json["results"] as? [[String: Any]],
-                  let first = results.first else { return }
+                  let first = results.first else { giveUp(); return }
             let name = first["trackName"] as? String
             let seller = first["sellerName"] as? String
             let artwork = (first["artworkUrl512"] as? String) ?? (first["artworkUrl100"] as? String)
@@ -1457,6 +1726,14 @@ final class HistoryWindowController: NSWindowController {
         super.init(window: window)
         buildUI()
         NotificationCenter.default.addObserver(self, selector: #selector(reload), name: .oboorHistoryChanged, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(settingsChanged), name: .oboorSettingsChanged, object: nil)
+    }
+
+    /// The window is cached for the app's lifetime, so without this it kept
+    /// the language it was first opened in.
+    @objc private func settingsChanged() {
+        window?.title = L.t(.historyWindowTitle)
+        reload()
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -1537,10 +1814,11 @@ final class SettingsWindowController: NSWindowController {
     /// instance — Settings just asks for it, the same pattern
     /// applicationDidFinishLaunching already uses for the menu item.
     var onShowHistory: (() -> Void)?
+    private var builtLanguage = SettingsStore.shared.language
 
     init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 380, height: 240),
+            contentRect: NSRect(x: 0, y: 0, width: 380, height: 330),
             styleMask: [.titled, .closable],
             backing: .buffered, defer: false
         )
@@ -1552,9 +1830,26 @@ final class SettingsWindowController: NSWindowController {
         window.center()
         super.init(window: window)
         buildUI()
+        NotificationCenter.default.addObserver(self, selector: #selector(settingsChanged), name: .oboorSettingsChanged, object: nil)
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// The window is cached for the app's lifetime, so switching language
+    /// left this very window in the old language until relaunch.
+    @objc private func settingsChanged() {
+        let language = SettingsStore.shared.language
+        guard language != builtLanguage else { return }
+        builtLanguage = language
+        // Deferred: this fires from inside the language popup's own action,
+        // and rebuilding removes that popup.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let content = self.window?.contentView else { return }
+            content.subviews.forEach { $0.removeFromSuperview() }
+            self.window?.title = L.t(.settingsWindowTitle)
+            self.buildUI()
+        }
+    }
 
     private func buildUI() {
         guard let content = window?.contentView else { return }
@@ -1579,13 +1874,32 @@ final class SettingsWindowController: NSWindowController {
         hotkeyRow.spacing = 8
         let hotkeyLabel = NSTextField(labelWithString: L.t(.hotkeyRow))
         let recorder = KeyRecorderView(keyCode: store.hotKeyCode, modifiers: store.hotKeyModifiers)
+        // The two shortcuts can't share a combo: Carbon refuses a duplicate
+        // registration, leaving one of them silently dead.
         recorder.onChange = { code, mods in
-            store.hotKeyCode = code
-            store.hotKeyModifiers = mods
+            guard code != store.pinKeyCode || mods != store.pinKeyModifiers else { return false }
+            store.setHotKey(code: code, modifiers: mods)
+            return true
         }
         hotkeyRow.addArrangedSubview(hotkeyLabel)
         hotkeyRow.addArrangedSubview(recorder)
         grid.addArrangedSubview(hotkeyRow)
+
+        // Pin key row — a bare key is allowed, since it's only claimed while
+        // the lens is up.
+        let pinRow = NSStackView()
+        pinRow.orientation = .horizontal
+        pinRow.spacing = 8
+        let pinLabel = NSTextField(labelWithString: L.t(.pinKeyRow))
+        let pinRecorder = KeyRecorderView(keyCode: store.pinKeyCode, modifiers: store.pinKeyModifiers, requiresModifier: false)
+        pinRecorder.onChange = { code, mods in
+            guard code != store.hotKeyCode || mods != store.hotKeyModifiers else { return false }
+            store.setPinKey(code: code, modifiers: mods)
+            return true
+        }
+        pinRow.addArrangedSubview(pinLabel)
+        pinRow.addArrangedSubview(pinRecorder)
+        grid.addArrangedSubview(pinRow)
 
         // Language row
         let langRow = NSStackView()
@@ -1601,6 +1915,28 @@ final class SettingsWindowController: NSWindowController {
         langRow.addArrangedSubview(langPopup)
         grid.addArrangedSubview(langRow)
 
+        // Private-browser row — only when there's something to choose from.
+        let browsers = PrivateBrowser.installed()
+        if !browsers.isEmpty {
+            let browserRow = NSStackView()
+            browserRow.orientation = .horizontal
+            browserRow.spacing = 8
+            let browserLabel = NSTextField(labelWithString: L.t(.privateBrowserRow))
+            let browserPopup = NSPopUpButton()
+            let automaticTitle = PrivateBrowser.automatic()
+                .map { "\(L.t(.privateBrowserAutomatic)) (\(PrivateBrowser.displayName(of: $0.app)))" }
+                ?? L.t(.privateBrowserAutomatic)
+            browserPopup.addItem(withTitle: automaticTitle)
+            browsers.forEach { browserPopup.addItem(withTitle: PrivateBrowser.displayName(of: $0.app)) }
+            let pickedIndex = store.privateBrowserID.flatMap { id in browsers.firstIndex { $0.bundleID == id } }
+            browserPopup.selectItem(at: pickedIndex.map { $0 + 1 } ?? 0)
+            browserPopup.target = self
+            browserPopup.action = #selector(privateBrowserChanged(_:))
+            browserRow.addArrangedSubview(browserLabel)
+            browserRow.addArrangedSubview(browserPopup)
+            grid.addArrangedSubview(browserRow)
+        }
+
         // Launch at login
         let loginCheckbox = NSButton(checkboxWithTitle: L.t(.launchAtLoginCheckbox), target: self, action: #selector(loginToggled(_:)))
         loginCheckbox.state = LoginItem.isEnabled ? .on : .off
@@ -1613,6 +1949,12 @@ final class SettingsWindowController: NSWindowController {
         let historyButton = NSButton(title: L.t(.historyMenuItem), target: self, action: #selector(openHistory))
         historyButton.bezelStyle = .rounded
         grid.addArrangedSubview(historyButton)
+    }
+
+    @objc private func privateBrowserChanged(_ sender: NSPopUpButton) {
+        let browsers = PrivateBrowser.installed()
+        let index = sender.indexOfSelectedItem - 1
+        SettingsStore.shared.privateBrowserID = browsers.indices.contains(index) ? browsers[index].bundleID : nil
     }
 
     @objc private func languageChanged(_ sender: NSPopUpButton) {
@@ -1632,7 +1974,7 @@ final class SettingsWindowController: NSWindowController {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
-    private let hotKey = GlobalHotKey(id: 1)
+    private let hotKey = GlobalHotKey(.scan)
     private var lens: LensWindowController?
     private var preview: PreviewWindowController?
     private var settings: SettingsWindowController?
@@ -1702,6 +2044,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func startScan() {
+        // "Scan a Code Now" from the menu while a lens is already up used to
+        // orphan the first one — still on screen, timers still running.
+        guard lens == nil else { return }
         guard ScreenCapturePermission.isGranted else {
             requestScreenRecordingPermission()
             return
@@ -1733,6 +2078,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showPreview(for raw: String) {
         let parsed = PayloadClassifier.classify(raw)
+        // Close the previous preview first: replacing the controller while its
+        // window stayed open left buttons targeting a deallocated controller.
+        preview?.close()
         let controller = PreviewWindowController(payload: parsed)
         preview = controller
         NSApp.activate(ignoringOtherApps: true)

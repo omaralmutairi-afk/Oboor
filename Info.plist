@@ -30,7 +30,7 @@
     <string>عُبور يحتاج الوصول لجهات الاتصال عشان يضيف جهة اتصال تقرأها من رمز QR.</string>
     <key>NSCalendarsUsageDescription</key>
     <string>عُبور يحتاج الوصول للتقويم عشان يضيف حدث تقرأه من رمز QR.</string>
-    <key>NSCalendarsFullAccessUsageDescription</key>
+    <key>NSCalendarsWriteOnlyAccessUsageDescription</key>
     <string>عُبور يحتاج الوصول للتقويم عشان يضيف حدث تقرأه من رمز QR.</string>
 </dict>
 </plist>

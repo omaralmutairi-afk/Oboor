@@ -30,7 +30,7 @@
 |---|---|
 | `⌘⇧O` | تشغيل/إيقاف وضع المسح (قابل للتغيير من الإعدادات) |
 | المكبّر يتبع مؤشرك تلقائيًا | مرّره فوق رمز QR فيتعرف عليه فورًا ويعرض معاينة لمحتواه |
-| `Space` مسافة | تثبيت المكبّر بمكانه (يتلوّن برتقاليًا) — ضغطة ثانية تعيده يتبع المؤشر |
+| `P` | تثبيت المكبّر بمكانه (يتلوّن برتقاليًا) — ضغطة ثانية تعيده يتبع المؤشر (قابل للتغيير من الإعدادات) |
 | `Esc` | إلغاء وضع المسح |
 | نقرة على نتيجة رابط | فتحه بالمتصفح — أو بتطبيق التواصل الاجتماعي المناسب إن وُجد |
 | نتيجة واي فاي | فتح إعدادات الواي فاي، مع نسخ أو إظهار كلمة المرور |
@@ -38,10 +38,10 @@
 | من قائمة شريط القوائم | مسح فوري، فتح السجل، الإعدادات، أو الإنهاء |
 
 #### الإعدادات
-اختصار تشغيل المسح (قابل للتسجيل)، لغة الواجهة (عربي/إنجليزي)، والتشغيل التلقائي عند بدء الماك.
+اختصار تشغيل المسح واختصار التثبيت (قابلان للتسجيل)، المتصفح المستخدم للفتح الخفي، لغة الواجهة (عربي/إنجليزي)، والتشغيل التلقائي عند بدء الماك.
 
 #### الصلاحيات
-يحتاج **تسجيل الشاشة (Screen Recording)** لالتقاط ما تحت المكبّر أثناء المسح — لا تصوير مستمر ولا حفظ، فقط أثناء المسح. كذلك **جهات الاتصال** و**التقويم** عند اختيارك إضافة جهة اتصال أو حدث من رمز ممسوح — لا وصول بدون طلبك المباشر.
+يحتاج **تسجيل الشاشة (Screen Recording)** لالتقاط ما تحت المكبّر أثناء المسح — لا تصوير مستمر ولا حفظ، فقط أثناء المسح. كذلك **جهات الاتصال** و**التقويم** (إضافة فقط، بدون قراءة مواعيدك) عند اختيارك إضافة جهة اتصال أو حدث من رمز ممسوح — لا وصول بدون طلبك المباشر.
 
 ### البناء من المصدر
 
@@ -75,7 +75,7 @@ Built as a single Swift file with no Xcode project, running from the menu bar wi
 |---|---|
 | `⌘⇧O` | Start/stop scan mode (changeable in Settings) |
 | Magnifier follows your cursor automatically | Hover it over a QR code and it's recognized instantly, showing a preview of its content |
-| `Space` | Pins the magnifier in place (turns orange) — press again to resume following the cursor |
+| `P` | Pins the magnifier in place (turns orange) — press again to resume following the cursor (changeable in Settings) |
 | `Esc` | Cancel scan mode |
 | Click a link result | Opens it in the browser — or the matching social app if one applies |
 | Wi-Fi result | Opens Wi-Fi settings, with the password copyable or revealable |
@@ -83,10 +83,10 @@ Built as a single Swift file with no Xcode project, running from the menu bar wi
 | From the menu bar | Scan now, open history, Settings, or quit |
 
 #### Settings
-A recordable scan hotkey, interface language (Arabic/English), and launch at startup.
+Recordable scan and pin shortcuts, the browser used for private opening, interface language (Arabic/English), and launch at startup.
 
 #### Permissions
-Requires **Screen Recording** to capture what's under the magnifier while scanning — no continuous capture and nothing saved, only while actively scanning. Also requests **Contacts** and **Calendar** access, but only when you choose to add a contact or event from a scanned code — no access without your direct action.
+Requires **Screen Recording** to capture what's under the magnifier while scanning — no continuous capture and nothing saved, only while actively scanning. Also requests **Contacts** and **Calendar** access (add-only — it never reads your events), but only when you choose to add a contact or event from a scanned code — no access without your direct action.
 
 ### Building from source
 
